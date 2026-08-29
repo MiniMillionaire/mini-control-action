@@ -39,20 +39,21 @@ go run ./cmd/minicontrol-runner --config config.yaml --dry-run   # safe: creates
   requested|pending`); runner `status` has NO documented enum — reap on
   `!= "online" && !busy`, never on `== "offline"`.
 - **A rejected create never degrades into a weaker one.** mini-control
-  rejects unknown create fields with a generic `400 "invalid json"`. When the
-  API-key surface still lacked `tag`, retrying without it "worked" — and
-  silently placed VMs on arbitrary workers while config promised a placement.
-  Failure is failure; the error propagates to the job.
+  rejects unknown create fields with a generic `400 "invalid json"`. The
+  API-key field is `region` (an exact worker-tag match). Sending the old
+  `tag` field is that 400. Retrying without the placement field "works" —
+  and silently places VMs on arbitrary workers while config promised a
+  placement. Failure is failure; the error propagates to the job.
 - **Worker tags are the only placement control, and they are exact.** The
-  API-key create takes `{"sku", "tag"}`; the tag is matched
-  case-insensitively and exactly (no zones, no regions — mini-control has no
-  such concept). An unmatched tag is a `409 no_workers_matching_tag`, so it
-  lands in the capacity path and retries within the job budget rather than
-  failing instantly — a typo'd tag looks like a capacity stall, so read the
-  reason code in the warning. Untagged creates skip workers whose tags end in
-  a server-configured suffix (`client_api.exclude_tag_suffixes`, live default
-  `["test"]`); an explicit tag bypasses that fence, which is why a
-  `*-test` worker is only reachable with the tag set.
+  API-key create takes `{"sku", "region"}`; region is matched
+  case-insensitively and exactly against one worker tag. An unmatched
+  region is a `409 no_workers_matching_tag`, so it lands in the capacity
+  path and retries within the job budget rather than failing instantly — a
+  typo looks like a capacity stall, so read the reason code in the warning.
+  Omitting region places on any eligible worker and skips workers whose
+  tags end in a server-configured suffix (`client_api.exclude_tag_suffixes`,
+  live default `["test"]`); an explicit region bypasses that fence, which
+  is why a `*-test` worker is only reachable with region set.
 - **Always log `worker_name`/`worker_tags` from the create response.** They
   are the only fleet visibility an API key gets and the only proof a
   requested placement was honoured; a whole debugging session was spent

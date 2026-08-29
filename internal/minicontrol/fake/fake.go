@@ -40,7 +40,7 @@ type Server struct {
 	nextID      int
 
 	// Knobs (set before use; guarded by mu for mid-test changes).
-	RejectTag       bool     // 400 on create when body has a tag field
+	RejectTag       bool     // 400 on create when body has a region field
 	FleetTag        string   // the tag this fake's only worker carries
 	WorkerName      string   // placement reported back; defaults to fake-worker-01
 	CapacityReason  string   // when set, creates fail 409 with this reason_code
@@ -243,8 +243,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(io2{r: r.Body, w: bodyRaw})
 	dec.DisallowUnknownFields()
 	var req struct {
-		SKU string `json:"sku"`
-		Tag string `json:"tag"`
+		SKU    string `json:"sku"`
+		Region string `json:"region"`
 	}
 	if err := dec.Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request: " + err.Error()})
@@ -256,7 +256,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	s.LastIdempotency = idem
 	s.IdemKeys[idem] = true
 
-	if s.RejectTag && req.Tag != "" {
+	if s.RejectTag && req.Region != "" {
 		// Mirror the live server: unknown-field rejections carry a generic
 		// message that does NOT mention the offending field.
 		writeJSON(w, 400, map[string]string{"error": "invalid json"})
@@ -287,9 +287,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(resp)
 		return
 	}
-	// A tag that no worker carries is a structured 409, never a placement
+	// A region that no worker carries is a structured 409, never a placement
 	// somewhere else.
-	if req.Tag != "" && !strings.EqualFold(req.Tag, s.FleetTag) {
+	if req.Region != "" && !strings.EqualFold(req.Region, s.FleetTag) {
 		resp, _ := json.Marshal(map[string]any{
 			"error": "no available worker matches the requested tag", "reason_code": "no_workers_matching_tag",
 		})
@@ -313,7 +313,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		ID:             pad(s.nextID),
 		Status:         "provisioning",
 		SKU:            req.SKU,
-		Tag:            req.Tag,
+		Tag:            req.Region,
 		WorkerName:     workerName,
 		WorkerTags:     workerTags,
 		GetsUntilReady: s.GetsUntilReady,

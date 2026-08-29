@@ -1,7 +1,9 @@
 package minicontrol_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -62,12 +64,35 @@ func TestCreateIdempotencyReplay(t *testing.T) {
 	}
 }
 
+// The live API-key create takes {"sku","region"}; the old "tag" field is
+// unknown JSON and 400s. Empty region must be omitted so untagged creates
+// place on any eligible worker.
+func TestCreateVMRequestJSONUsesRegion(t *testing.T) {
+	tagged, err := json.Marshal(minicontrol.CreateVMRequest{SKU: "m4-titan-v1", Region: "jp-east-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(tagged, []byte(`"region":"jp-east-01"`)) {
+		t.Fatalf("create body missing region: %s", tagged)
+	}
+	if bytes.Contains(tagged, []byte(`"tag"`)) {
+		t.Fatalf("create body still sends tag: %s", tagged)
+	}
+	untagged, err := json.Marshal(minicontrol.CreateVMRequest{SKU: "m4-titan-v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(untagged, []byte("region")) {
+		t.Fatalf("empty region must be omitted: %s", untagged)
+	}
+}
+
 // A deployment that does not accept the worker tag must fail the create, not
 // quietly place the VM on an arbitrary worker.
 func TestCreateTagRejectionIsFatal(t *testing.T) {
 	c, srv := newClient(t)
 	srv.RejectTag = true
-	vm, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", Tag: "cn-east-01-test"}, "key-tag")
+	vm, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", Region: "cn-east-01-test"}, "key-tag")
 	if err == nil {
 		t.Fatalf("tagged create succeeded against a server that rejects tags: %+v", vm)
 	}
@@ -85,7 +110,7 @@ func TestCreateTagPlacement(t *testing.T) {
 	srv.WorkerName = "zz-mini-worker-05"
 	ctx := context.Background()
 
-	vm, err := c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1", Tag: "cn-east-01"}, "key-place")
+	vm, err := c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1", Region: "cn-east-01"}, "key-place")
 	if err != nil {
 		t.Fatalf("tagged create failed: %v", err)
 	}
@@ -96,7 +121,7 @@ func TestCreateTagPlacement(t *testing.T) {
 		t.Fatalf("worker_tags = %v, want [cn-east-01]", vm.WorkerTags)
 	}
 
-	_, err = c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1", Tag: "jp-east-01"}, "key-nomatch")
+	_, err = c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1", Region: "jp-east-01"}, "key-nomatch")
 	if !minicontrol.IsCapacity(err) {
 		t.Fatalf("unmatched tag error = %v, want a structured capacity 409", err)
 	}

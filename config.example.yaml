@@ -62,13 +62,15 @@ minicontrol:
   api_key: ${MINICONTROL_API_KEY}        # mck_... from the mini-control console
   sku: m4-big-v1                         # fixed preset: 8 CPU / 8 GiB / 150 GiB
   worker_tag: ""                         # optional placement constraint, e.g.
-                                         # "cn-east-01". Sent as {"tag": ...},
+                                         # "jp-east-01". Sent as {"region": ...},
                                          # matched case-insensitively and
-                                         # exactly. No match => 409
+                                         # exactly against one worker tag.
+                                         # Empty = any eligible worker.
+                                         # No match => 409
                                          # no_workers_matching_tag; a server
-                                         # without tag support => 400. Either
-                                         # way the create fails — the constraint
-                                         # is never dropped silently.
+                                         # that rejects the field => 400.
+                                         # Either way the create fails — the
+                                         # constraint is never dropped silently.
                                          # NOTE: untagged creates skip workers
                                          # whose tags end in a server-excluded
                                          # suffix (default "test"), so a

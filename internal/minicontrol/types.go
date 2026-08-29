@@ -32,11 +32,12 @@ type SKU struct {
 
 type CreateVMRequest struct {
 	SKU string `json:"sku"`
-	// Tag is an optional worker placement constraint. Omitted from the JSON
-	// body when empty; deployments without tag support reject the unknown
-	// field with a 400 and the create fails — the constraint is never
+	// Region is an optional exact worker-tag match. Omitted from the JSON
+	// body when empty so the server places on any eligible worker. The
+	// API-key field is "region"; sending "tag" is a 400 "invalid json"
+	// (unknown field) and the create fails — the constraint is never
 	// silently dropped.
-	Tag string `json:"tag,omitempty"`
+	Region string `json:"region,omitempty"`
 }
 
 type VM struct {

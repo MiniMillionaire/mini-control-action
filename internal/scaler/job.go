@@ -187,8 +187,8 @@ func (s *Scaler) createVM(ctx context.Context, rec *state.Record, log logger) (*
 	deadline := time.Now().Add(s.cfg.Runner.MaxJobDuration.D()) // capacity waits can't exceed the job budget
 	for {
 		vm, err := s.mc.CreateVM(ctx, minicontrol.CreateVMRequest{
-			SKU: s.cfg.MiniControl.SKU,
-			Tag: s.cfg.MiniControl.WorkerTag,
+			SKU:    s.cfg.MiniControl.SKU,
+			Region: s.cfg.MiniControl.WorkerTag,
 		}, rec.IdempotencyKey)
 		if err == nil {
 			return vm, false, nil

@@ -144,10 +144,10 @@ func (c *Client) ListSKUs(ctx context.Context) ([]SKU, error) {
 // safe but means capacity retries need fresh keys.
 //
 // A rejected create is a failure, never a downgrade: a deployment that does
-// not accept the configured worker tag answers with a generic
-// 400 "invalid json", and silently retrying without the tag would place the
-// VM on an arbitrary worker while the config still claims a placement
-// constraint. The error is returned as-is.
+// not accept the configured region answers with a generic 400 "invalid json",
+// and silently retrying without it would place the VM on an arbitrary worker
+// while the config still claims a placement constraint. The error is
+// returned as-is.
 func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest, idempotencyKey string) (*VM, error) {
 	if n := len(idempotencyKey); n < 1 || n > 128 {
 		return nil, fmt.Errorf("idempotency key must be 1-128 bytes, got %d", n)
@@ -160,9 +160,9 @@ func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest, idempotencyK
 	if err := c.do(ctx, http.MethodPost, "/vms", req, hdr, vm); err != nil {
 		// The unknown-field rejection is generic ("invalid json"), so name the
 		// likely culprit here rather than making the operator rediscover it.
-		if ae, ok := err.(*APIError); ok && ae.Status == 400 && req.Tag != "" {
-			c.log.Error("create rejected; this deployment may not accept a worker tag",
-				"tag", req.Tag, "error", ae.Message)
+		if ae, ok := err.(*APIError); ok && ae.Status == 400 && req.Region != "" {
+			c.log.Error("create rejected; this deployment may not accept a region",
+				"region", req.Region, "error", ae.Message)
 		}
 		return nil, err
 	}

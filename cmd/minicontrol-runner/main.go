@@ -210,7 +210,7 @@ func runSmoke(ctx context.Context, cfg *config.Config, mc *minicontrol.Client, s
 	tag := cfg.MiniControl.WorkerTag
 	fmt.Printf("== smoke test: create %s (tag %q), exec, delete (bills real money) ==\n", sku, tag)
 	idem := fmt.Sprintf("mcra-smoke-%d", time.Now().UnixNano())
-	vm, err := mc.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: sku, Tag: tag}, idem)
+	vm, err := mc.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: sku, Region: tag}, idem)
 	if err != nil {
 		fmt.Println("create: FAILED:", err)
 		return 1
