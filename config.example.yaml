@@ -45,8 +45,11 @@ github:
 
   poll:
     interval: 60s                        # queued-job discovery cadence (pull-only)
-    # repos:                             # org scope only: which repos to poll
-    #   - your-org/repo-a
+    # repos:                             # always polled, even with scope: all
+    #   - your-org/repo-a                # (discovery only adds recently-pushed
+                                         # repos; a rerun does not bump push time)
+    # active_window: 2h                  # discovery window; known repos from
+                                         # the state file are polled regardless
 
 # ---------------------------------------------------------------------------
 # mini-control: where the macOS VMs come from.

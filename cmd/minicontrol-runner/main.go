@@ -110,6 +110,7 @@ func main() {
 		ActiveWindow: cfg.GitHub.Poll.ActiveWindow.D(), MaxRepos: cfg.GitHub.Poll.MaxRepos,
 		OurLabels: cfg.Runner.Labels,
 		Interval:  cfg.GitHub.Poll.Interval.D(), Submit: sc.Submit, Log: log,
+		ExtraRepos: store.Repos,
 	}
 	wg.Add(1)
 	go func() {

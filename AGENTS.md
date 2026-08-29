@@ -80,7 +80,10 @@ go run ./cmd/minicontrol-runner --config config.yaml --dry-run   # safe: creates
   at BOTH repo and org scope; `work_folder` is relative to the runner install
   dir). The release download URL must come from the release's `assets[]`,
   fetched from `releasesBase` (always api.github.com, never a GHE base).
-  `/user/repos` reflects the USER's access, not a token allowlist.
+  `/user/repos` reflects the USER's access, not a token allowlist. There is
+  no webhook: scope `all` discovers recently-pushed repos, then unions
+  configured `poll.repos` and repos already in the state file so a rerun
+  on a quiet repo is still seen (reruns do not bump `pushed_at`).
 - mini-control: only the worker hostname serves API keys; `Idempotency-Key`
   is required (1–128 bytes); billing runs until VM deletion is
   worker-confirmed; exec is `/bin/sh -lc`, no stdin, ~1 MiB output caps —

@@ -79,12 +79,14 @@ type GitHubAuth struct {
 
 type Poll struct {
 	Interval Duration `yaml:"interval"`
-	// Repos lists "owner/repo" names to poll for queued jobs when scope is
-	// org; ignored for repo scope (the configured repo is polled).
+	// Repos lists extra "owner/repo" names always polled. Ignored for repo
+	// scope (the configured repo is polled). With scope "all" they are
+	// unioned with recently-pushed discovery — not replaced by it.
 	Repos []string `yaml:"repos"`
-	// ActiveWindow/MaxRepos bound polling for scope "all": only repos pushed
-	// within the window (newest first, capped) are polled each cycle, so a
-	// broad token doesn't blow the API rate budget.
+	// ActiveWindow/MaxRepos bound discovery for scope "all": only repos
+	// pushed within the window (newest first, capped) are added each cycle.
+	// A rerun does not bump pushed_at, so known repos from the state file
+	// stay in the poll set regardless of this window.
 	ActiveWindow Duration `yaml:"active_window"`
 	MaxRepos     int      `yaml:"max_repos"`
 }

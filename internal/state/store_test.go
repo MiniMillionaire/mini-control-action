@@ -39,6 +39,28 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestReposDedupes(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.json"), slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, rec := range []Record{
+		{JobID: 1, RunAttempt: 1, Repo: "acme/widgets", State: StateFailed, QueuedAt: now},
+		{JobID: 2, RunAttempt: 1, Repo: "acme/widgets", State: StateQueued, QueuedAt: now},
+		{JobID: 3, RunAttempt: 1, Repo: "acme/gadgets", State: StateComplete, QueuedAt: now},
+		{JobID: 4, RunAttempt: 1, Repo: "", State: StateFailed, QueuedAt: now},
+	} {
+		if err := s.Upsert(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := s.Repos()
+	if len(got) != 2 || got[0] != "acme/gadgets" || got[1] != "acme/widgets" {
+		t.Fatalf("Repos() = %v, want [acme/gadgets acme/widgets]", got)
+	}
+}
+
 func TestNewIdemKey(t *testing.T) {
 	k1 := NewIdemKey(7, 2, 1)
 	k2 := NewIdemKey(7, 2, 1)

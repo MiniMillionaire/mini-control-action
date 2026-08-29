@@ -42,7 +42,8 @@ type Server struct {
 	JobsFetches  int // GET .../runs/{id}/jobs calls
 	RemovedIDs   []int64
 	LatestTag    string
-	Repos        []string // served by /user/repos
+	Repos        []string  // served by /user/repos
+	PushedAt     time.Time // /user/repos pushed_at; zero means now
 }
 
 func New() *Server {
@@ -193,10 +194,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	case path == "/user/repos" && r.Method == "GET":
+		pushed := s.PushedAt
+		if pushed.IsZero() {
+			pushed = time.Now().UTC()
+		}
 		out := []map[string]any{}
 		for _, name := range s.Repos {
 			out = append(out, map[string]any{"full_name": name, "archived": false,
-				"pushed_at": time.Now().UTC().Format(time.RFC3339)})
+				"pushed_at": pushed.Format(time.RFC3339)})
 		}
 		writeJSON(200, out)
 	case strings.Contains(path, "/actions/runs") && strings.HasSuffix(path, "/jobs") && r.Method == "GET":

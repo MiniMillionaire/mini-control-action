@@ -176,6 +176,24 @@ func (s *Store) Get(k Key) (Record, bool) {
 	return r, ok
 }
 
+// Repos returns unique owner/repo names from stored records, sorted.
+func (s *Store) Repos() []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, r := range s.List() {
+		if r.Repo == "" {
+			continue
+		}
+		if _, ok := seen[r.Repo]; ok {
+			continue
+		}
+		seen[r.Repo] = struct{}{}
+		out = append(out, r.Repo)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // List returns all records, newest-queued first.
 func (s *Store) List() []Record {
 	s.mu.Lock()
