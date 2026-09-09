@@ -12,9 +12,7 @@ services:
         max-file: "5"
     ports:
       - "127.0.0.1:18080:8080" # /healthz + /status (local only)
-    environment:
-      MINICONTROL_API_KEY: ${MINICONTROL_API_KEY}
-      GITHUB_PAT: ${GITHUB_PAT}
+    env_file: .env
     volumes:
       - ./config.yaml:/etc/minicontrol-runner/config.yaml:ro
       - runner-state:/var/lib/minicontrol-runner

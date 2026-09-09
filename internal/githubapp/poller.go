@@ -11,6 +11,7 @@ import (
 // "in_progress"/"completed" exist for internal signaling and tests.
 // ("waiting" — environment protection gating — is dropped at Submit.)
 type JobEvent struct {
+	Account    string
 	Action     string
 	Job        JobRef
 	Conclusion string

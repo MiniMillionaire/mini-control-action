@@ -14,6 +14,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/Lakr233/mini-control-action/internal/config"
 )
 
 // JobState is the FSM state of one workflow job's runner VM.
@@ -36,12 +38,15 @@ const (
 func (s JobState) Terminal() bool { return s == StateComplete || s == StateFailed }
 
 type Record struct {
-	JobID          int64    `json:"job_id"`
-	RunAttempt     int      `json:"run_attempt"`
-	Retry          int      `json:"retry"`
-	Repo           string   `json:"repo"` // "owner/repo"
-	Labels         []string `json:"labels"`
-	WorkflowJobURL string   `json:"workflow_job_url,omitempty"`
+	Namespace      string       `json:"namespace,omitempty"`
+	Plan           *config.Plan `json:"plan,omitempty"`
+	RegionIndex    int          `json:"region_index,omitempty"`
+	JobID          int64        `json:"job_id"`
+	RunAttempt     int          `json:"run_attempt"`
+	Retry          int          `json:"retry"`
+	Repo           string       `json:"repo"` // "owner/repo"
+	Labels         []string     `json:"labels"`
+	WorkflowJobURL string       `json:"workflow_job_url,omitempty"`
 
 	State          JobState  `json:"state"`
 	VMID           string    `json:"vm_id,omitempty"`
@@ -57,9 +62,12 @@ type Record struct {
 type Key struct {
 	JobID      int64
 	RunAttempt int
+	Namespace  string
 }
 
-func (r *Record) Key() Key { return Key{r.JobID, r.RunAttempt} }
+func (r *Record) Key() Key {
+	return Key{JobID: r.JobID, RunAttempt: r.RunAttempt, Namespace: r.Namespace}
+}
 
 // NewIdemKey builds the Idempotency-Key for one create attempt. The random
 // suffix guarantees a fresh key even if the state file was lost and counters
@@ -79,22 +87,24 @@ func ShortNonce() string {
 }
 
 type Store struct {
-	mu   sync.Mutex
-	path string
-	recs map[Key]Record
-	log  *slog.Logger
+	mu     sync.Mutex
+	path   string
+	recs   map[Key]Record
+	owners map[string]string
+	log    *slog.Logger
 }
 
 type fileFormat struct {
-	Version int      `json:"version"`
-	Records []Record `json:"records"`
+	Version int               `json:"version"`
+	Records []Record          `json:"records"`
+	Owners  map[string]string `json:"owners,omitempty"`
 }
 
 // Open loads (or initializes) the store at path. A corrupt file is moved
 // aside to <path>.corrupt and the store starts fresh with a loud error log —
 // the reconciler will re-adopt or delete any VMs the lost records tracked.
 func Open(path string, log *slog.Logger) (*Store, error) {
-	s := &Store{path: path, recs: map[Key]Record{}, log: log}
+	s := &Store{path: path, recs: map[Key]Record{}, owners: map[string]string{}, log: log}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
@@ -115,6 +125,12 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 		}
 		return s, nil
 	}
+	if f.Version > 2 {
+		return nil, fmt.Errorf("unsupported state version %d", f.Version)
+	}
+	if f.Owners != nil {
+		s.owners = f.Owners
+	}
 	for _, r := range f.Records {
 		s.recs[r.Key()] = r
 	}
@@ -124,11 +140,14 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 // persist writes atomically: temp file in the same directory, then rename.
 // Caller must hold mu.
 func (s *Store) persist() error {
-	f := fileFormat{Version: 1, Records: make([]Record, 0, len(s.recs))}
+	f := fileFormat{Version: 2, Owners: s.owners, Records: make([]Record, 0, len(s.recs))}
 	for _, r := range s.recs {
 		f.Records = append(f.Records, r)
 	}
 	sort.Slice(f.Records, func(i, j int) bool {
+		if f.Records[i].Namespace != f.Records[j].Namespace {
+			return f.Records[i].Namespace < f.Records[j].Namespace
+		}
 		if f.Records[i].JobID != f.Records[j].JobID {
 			return f.Records[i].JobID < f.Records[j].JobID
 		}
@@ -165,15 +184,24 @@ func (s *Store) Upsert(rec Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec.UpdatedAt = time.Now().UTC()
-	s.recs[rec.Key()] = rec
-	return s.persist()
+	previous, existed := s.recs[rec.Key()]
+	s.recs[rec.Key()] = cloneRecord(rec)
+	if err := s.persist(); err != nil {
+		if existed {
+			s.recs[rec.Key()] = previous
+		} else {
+			delete(s.recs, rec.Key())
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) Get(k Key) (Record, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.recs[k]
-	return r, ok
+	return cloneRecord(r), ok
 }
 
 // Repos returns unique owner/repo names from stored records, sorted.
@@ -200,7 +228,7 @@ func (s *Store) List() []Record {
 	defer s.mu.Unlock()
 	out := make([]Record, 0, len(s.recs))
 	for _, r := range s.recs {
-		out = append(out, r)
+		out = append(out, cloneRecord(r))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].QueuedAt.After(out[j].QueuedAt) })
 	return out
@@ -235,4 +263,39 @@ func (s *Store) HasVM(vmID string) bool {
 		}
 	}
 	return false
+}
+
+// RepositoryOwner is durable across job retention and restarts.
+func (s *Store) RepositoryOwner(namespace string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.owners[namespace]
+}
+
+func (s *Store) BindRepository(namespace, account string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owners[namespace] == account {
+		return nil
+	}
+	if old := s.owners[namespace]; old != "" && old != account {
+		return fmt.Errorf("repository already belongs to account %q", old)
+	}
+	s.owners[namespace] = account
+	if err := s.persist(); err != nil {
+		delete(s.owners, namespace)
+		return err
+	}
+	return nil
+}
+
+func cloneRecord(r Record) Record {
+	r.Labels = append([]string(nil), r.Labels...)
+	if r.Plan != nil {
+		p := *r.Plan
+		p.Regions = append([]string(nil), p.Regions...)
+		p.Runner.Labels = append([]string(nil), p.Runner.Labels...)
+		r.Plan = &p
+	}
+	return r
 }

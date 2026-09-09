@@ -33,15 +33,17 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 func (d Duration) D() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Log         Log         `yaml:"log"`
-	Server      Server      `yaml:"server"`
-	GitHub      GitHub      `yaml:"github"`
-	MiniControl MiniControl `yaml:"minicontrol"`
-	Runner      Runner      `yaml:"runner"`
-	Limits      Limits      `yaml:"limits"`
-	Reconciler  Reconciler  `yaml:"reconciler"`
-	State       State       `yaml:"state"`
-	Debug       Debug       `yaml:"debug"`
+	Log         Log             `yaml:"log"`
+	Server      Server          `yaml:"server"`
+	GitHub      GitHub          `yaml:"github"`
+	MiniControl MiniControl     `yaml:"minicontrol"`
+	Runner      Runner          `yaml:"runner"`
+	Limits      Limits          `yaml:"limits"`
+	Reconciler  Reconciler      `yaml:"reconciler"`
+	State       State           `yaml:"state"`
+	Debug       Debug           `yaml:"debug"`
+	Pools       map[string]Pool `yaml:"pools"`
+	Defaults    Policy          `yaml:"defaults"`
 }
 
 type Log struct {
@@ -54,7 +56,8 @@ type Server struct {
 }
 
 type GitHub struct {
-	APIBaseURL string `yaml:"api_base_url"` // default https://api.github.com; override for GHE/tests
+	Accounts   map[string]Account `yaml:"accounts"`
+	APIBaseURL string             `yaml:"api_base_url"` // default https://api.github.com; override for GHE/tests
 	// Scope selects where runners are registered and which repos are watched:
 	//   all  - every repo the token can access (discovered via /user/repos);
 	//          runners are registered per-job on the job's own repo
@@ -78,7 +81,8 @@ type GitHubAuth struct {
 }
 
 type Poll struct {
-	Interval Duration `yaml:"interval"`
+	QuietInterval Duration `yaml:"quiet_interval"`
+	Interval      Duration `yaml:"interval"`
 	// Repos lists extra "owner/repo" names always polled. Ignored for repo
 	// scope (the configured repo is polled). With scope "all" they are
 	// unioned with recently-pushed discovery — not replaced by it.
@@ -92,6 +96,7 @@ type Poll struct {
 }
 
 type MiniControl struct {
+	BaseImage        string   `yaml:"base_image"`
 	BaseURL          string   `yaml:"base_url"`
 	APIKey           string   `yaml:"api_key"`
 	SKU              string   `yaml:"sku"`
@@ -190,6 +195,7 @@ func (c *Config) applyDefaults() {
 		c.GitHub.RunnerGroupID = 1
 	}
 	def(&c.GitHub.Poll.Interval, 60*time.Second)
+	def(&c.GitHub.Poll.QuietInterval, 10*time.Minute)
 	def(&c.GitHub.Poll.ActiveWindow, 2*time.Hour)
 	if c.GitHub.Poll.MaxRepos == 0 {
 		c.GitHub.Poll.MaxRepos = 10
@@ -255,7 +261,7 @@ func (c *Config) Validate() error {
 	default:
 		bad("github.scope must be all|repo|org, got %q", c.GitHub.Scope)
 	}
-	if c.GitHub.Auth.Token == "" {
+	if c.GitHub.Auth.Token == "" && len(c.GitHub.Accounts) == 0 {
 		bad("github.auth.token is required")
 	}
 	if c.GitHub.Scope == "org" && len(c.GitHub.Poll.Repos) == 0 {
@@ -267,7 +273,7 @@ func (c *Config) Validate() error {
 	if !strings.HasPrefix(c.MiniControl.APIKey, "mck_") {
 		bad("minicontrol.api_key must be a mck_-prefixed key (got %d bytes)", len(c.MiniControl.APIKey))
 	}
-	if c.MiniControl.SKU == "" {
+	if c.MiniControl.SKU == "" && len(c.GitHub.Accounts) == 0 {
 		bad("minicontrol.sku is required")
 	}
 	hasSelfHosted := false
@@ -285,6 +291,7 @@ func (c *Config) Validate() error {
 	if c.Limits.MaxConcurrentVMs < 1 {
 		bad("limits.max_concurrent_vms must be >= 1")
 	}
+	errs = append(errs, c.validateAccounts())
 	return errors.Join(errs...)
 }
 

@@ -13,7 +13,7 @@ import (
 	"github.com/Lakr233/mini-control-action/internal/state"
 )
 
-func New(cfg *config.Config, store *state.Store, log *slog.Logger) *http.Server {
+func New(cfg *config.Config, store *state.Store, log *slog.Logger, details ...func() any) *http.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -30,10 +30,14 @@ func New(cfg *config.Config, store *state.Store, log *slog.Logger) *http.Server 
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		response := map[string]any{
 			"active_jobs": active,
 			"records":     recs,
-		})
+		}
+		if len(details) > 0 {
+			response["scheduling"] = details[0]()
+		}
+		_ = json.NewEncoder(w).Encode(response)
 	})
 
 	return &http.Server{

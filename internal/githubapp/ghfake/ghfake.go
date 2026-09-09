@@ -14,6 +14,7 @@ import (
 )
 
 type Job struct {
+	Repo       string
 	ID         int64
 	RunID      int64
 	RunAttempt int
@@ -25,6 +26,7 @@ type Job struct {
 }
 
 type Runner struct {
+	Scope  string
 	ID     int64
 	Name   string
 	Status string
@@ -32,6 +34,7 @@ type Runner struct {
 }
 
 type Server struct {
+	DeniedRepos map[string]int
 	*httptest.Server
 
 	mu           sync.Mutex
@@ -42,8 +45,9 @@ type Server struct {
 	JobsFetches  int // GET .../runs/{id}/jobs calls
 	RemovedIDs   []int64
 	LatestTag    string
-	Repos        []string  // served by /user/repos
-	PushedAt     time.Time // /user/repos pushed_at; zero means now
+	Repos        []string        // served by /user/repos
+	DeniedTokens map[string]bool // configured before serving
+	PushedAt     time.Time       // /user/repos pushed_at; zero means now
 }
 
 func New() *Server {
@@ -60,6 +64,9 @@ func New() *Server {
 func (s *Server) SetJob(j *Job) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if j.Repo == "" {
+		j.Repo = "acme/widgets"
+	}
 	s.Jobs[j.ID] = j
 }
 
@@ -118,6 +125,20 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(v)
 	}
+	if s.DeniedTokens[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")] {
+		writeJSON(403, map[string]string{"message": "resource not accessible"})
+		return
+	}
+	repo := ""
+	parts := strings.Split(path, "/")
+	if len(parts) >= 4 && parts[1] == "repos" {
+		repo = parts[2] + "/" + parts[3]
+	}
+	if status := s.DeniedRepos[repo]; status != 0 {
+		writeJSON(status, map[string]string{"message": "repository access blocked"})
+		return
+	}
+	scope := strings.Split(path, "/actions/runners")[0]
 	switch {
 	case strings.HasSuffix(path, "/actions/runners/generate-jitconfig") && r.Method == "POST":
 		var req struct {
@@ -126,14 +147,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		for _, existing := range s.Runners {
-			if existing.Name == req.Name {
+			if existing.Name == req.Name && existing.Scope == scope {
 				writeJSON(409, map[string]string{"message": "runner name already exists"})
 				return
 			}
 		}
 		s.nextRunnerID++
 		s.JITCalls++
-		rn := &Runner{ID: s.nextRunnerID, Name: req.Name, Status: "offline"}
+		rn := &Runner{Scope: scope, ID: s.nextRunnerID, Name: req.Name, Status: "offline"}
 		s.Runners[rn.ID] = rn
 		writeJSON(201, map[string]any{
 			"runner":             map[string]any{"id": rn.ID, "name": rn.Name},
@@ -157,6 +178,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 		for _, id := range ids {
 			rn := s.Runners[id]
+			if rn.Scope != "" && rn.Scope != scope {
+				continue
+			}
 			all = append(all, map[string]any{"id": rn.ID, "name": rn.Name, "status": rn.Status, "busy": rn.Busy})
 		}
 		lo := min((page-1)*perPage, len(all))
@@ -176,7 +200,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		var id int64
 		fmt.Sscanf(path[strings.LastIndex(path, "/")+1:], "%d", &id)
 		j, ok := s.Jobs[id]
-		if !ok {
+		if !ok || j.Repo != repo {
 			writeJSON(404, map[string]string{"message": "job not found"})
 			return
 		}
@@ -199,7 +223,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			pushed = time.Now().UTC()
 		}
 		out := []map[string]any{}
-		for _, name := range s.Repos {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		lo := min((page-1)*100, len(s.Repos))
+		hi := min(lo+100, len(s.Repos))
+		for _, name := range s.Repos[lo:hi] {
 			out = append(out, map[string]any{"full_name": name, "archived": false,
 				"pushed_at": pushed.Format(time.RFC3339)})
 		}
@@ -211,7 +241,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		fmt.Sscanf(parts[len(parts)-2], "%d", &runID)
 		jobs := []map[string]any{}
 		for _, j := range s.Jobs {
-			if j.RunID == runID {
+			if j.Repo == repo && j.RunID == runID {
 				jobs = append(jobs, map[string]any{
 					"id": j.ID, "run_id": j.RunID, "run_attempt": j.RunAttempt,
 					"status": j.Status, "labels": j.Labels,
@@ -228,12 +258,15 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		// exactly when something about the run changes (gating fidelity).
 		sig := map[int64]string{}
 		for _, j := range s.Jobs {
+			if j.Repo != repo {
+				continue
+			}
 			sig[j.RunID] += fmt.Sprintf("%d=%s;", j.ID, j.Status)
 		}
 		runs := map[int64]bool{}
 		out := []map[string]any{}
 		for _, j := range s.Jobs {
-			if j.Status == want && !runs[j.RunID] {
+			if j.Repo == repo && j.Status == want && !runs[j.RunID] {
 				runs[j.RunID] = true
 				out = append(out, map[string]any{
 					"id": j.RunID, "run_attempt": j.RunAttempt, "updated_at": sig[j.RunID],

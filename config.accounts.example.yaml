@@ -1,0 +1,58 @@
+# Multi-account mode. Keep actual configuration and secrets outside Git.
+# Every account discovers repositories automatically; owners can narrow scope.
+github:
+  poll:
+    interval: 60s
+    quiet_interval: 10m
+    active_window: 2h
+  accounts:
+    personal:
+      token: ${PERSONAL_GITHUB_TOKEN}
+      priority: 0
+      discover: all
+      owners: [example-user]
+      defaults:
+        pool: standard
+      exclude: [example-user/archived-project]
+      repositories:
+        example-user/release-project:
+          max_concurrent_vms: 1
+          max_job_duration: 1h
+    organization:
+      token: ${ORG_GITHUB_TOKEN}
+      priority: 10
+      discover: all
+      owners: [example-org]
+      defaults:
+        pool: standard
+
+minicontrol:
+  base_url: https://worker.example.com/api/client/v1
+  api_key: ${MINICONTROL_API_KEY} # dedicated to this deployment
+
+pools:
+  standard:
+    sku: m4-big-v1
+    base_image: example-image # optional; omit to use the server default
+    regions: [example-region]
+    # Multiple regions are tried in order on explicit capacity rejection.
+    # To allow any eligible worker, replace regions with any_region: true.
+    max_concurrent_vms: 4
+    paused: false
+
+defaults:
+  max_concurrent_vms: 2
+  max_job_duration: 2h
+
+limits:
+  max_concurrent_vms: 4
+
+runner:
+  labels: [self-hosted, macos, arm64, mini-control]
+  version: latest
+
+server:
+  listen: ":8080"
+
+state:
+  path: /var/lib/minicontrol-runner/state.json

@@ -24,18 +24,22 @@ func nowUTC() time.Time { return time.Now().UTC() }
 func (s *Scaler) runJob(ctx context.Context, rec state.Record, events chan githubapp.JobEvent) {
 	log := s.log.With("repo", rec.Repo, "job_id", rec.JobID, "attempt", rec.RunAttempt)
 
-	// Bound total VM concurrency. Deletion-only resumes skip the queue wait
-	// by checking if there is anything left to run.
-	select {
-	case s.sem <- struct{}{}:
-	case <-ctx.Done():
+	if err := s.admission.acquire(ctx, rec); err != nil {
 		return
 	}
-	defer func() { <-s.sem }()
+	defer func() {
+		// Failed cleanup keeps its reservation until reconciliation confirms absence.
+		if rec.State != state.StateDeleting {
+			s.admission.release(rec.Key())
+		}
+	}()
 
 	for {
 		retryable, err := s.attempt(ctx, &rec, events, log)
 		if err == nil || ctx.Err() != nil {
+			return
+		}
+		if rec.State == state.StateDeleting {
 			return
 		}
 		log.Warn("job attempt failed", "retry", rec.Retry, "error", err)
@@ -102,7 +106,7 @@ func (s *Scaler) attempt(ctx context.Context, rec *state.Record, events chan git
 		s.persist(rec, log)
 		log.Info("vm created", "vm_id", vm.ID, "status", vm.Status,
 			"worker", vm.WorkerName, "worker_tags", vm.WorkerTags,
-			"requested_tag", s.cfg.MiniControl.WorkerTag)
+			"requested_tag", s.createRegion(rec), "base_image", s.cfg.MiniControl.BaseImage)
 	}
 
 	// failCleanup deletes the VM after a genuine failure — but NOT on
@@ -113,7 +117,9 @@ func (s *Scaler) attempt(ctx context.Context, rec *state.Record, events chan git
 			log.Info("shutting down mid-attempt; keeping vm for resume", "vm_id", rec.VMID)
 			return false, err
 		}
-		s.deleteVM(ctx, rec, log)
+		if cleanupErr := s.deleteVM(ctx, rec, log); cleanupErr != nil {
+			return false, cleanupErr
+		}
 		return true, err
 	}
 
@@ -158,7 +164,9 @@ func (s *Scaler) attempt(ctx context.Context, rec *state.Record, events chan git
 	if rec.State == state.StateJobDone || rec.State == state.StateDeleting {
 		rec.State = state.StateDeleting
 		s.persist(rec, log)
-		s.deleteVM(ctx, rec, log)
+		if err := s.deleteVM(ctx, rec, log); err != nil {
+			return false, err
+		}
 		s.removeRunnerRegistration(ctx, rec, log)
 		rec.State = state.StateComplete
 		s.persist(rec, log)
@@ -184,11 +192,13 @@ func (s *Scaler) persist(rec *state.Record, log logger) {
 // means the job no longer needs one.
 func (s *Scaler) createVM(ctx context.Context, rec *state.Record, log logger) (*minicontrol.VM, bool, error) {
 	backoff := s.cfg.Limits.CapacityBackoff.Initial.D()
-	deadline := time.Now().Add(s.cfg.Runner.MaxJobDuration.D()) // capacity waits can't exceed the job budget
+	deadline := rec.QueuedAt.Add(s.cfg.Runner.MaxJobDuration.D()) // persisted budget survives restart
+	uncertain := false
 	for {
 		vm, err := s.mc.CreateVM(ctx, minicontrol.CreateVMRequest{
-			SKU:    s.cfg.MiniControl.SKU,
-			Region: s.cfg.MiniControl.WorkerTag,
+			BaseImage: s.cfg.MiniControl.BaseImage,
+			SKU:       s.cfg.MiniControl.SKU,
+			Region:    s.createRegion(rec),
 		}, rec.IdempotencyKey)
 		if err == nil {
 			return vm, false, nil
@@ -196,9 +206,14 @@ func (s *Scaler) createVM(ctx context.Context, rec *state.Record, log logger) (*
 		var wait time.Duration
 		switch {
 		case minicontrol.IsCapacity(err):
+			uncertain = false
 			log.Warn("no capacity, backing off", "error", err, "backoff", backoff)
 			wait = backoff
 			backoff = min(backoff*2, s.cfg.Limits.CapacityBackoff.Max.D())
+			if rec.Plan != nil {
+				rec.RegionIndex = (rec.RegionIndex + 1) % len(rec.Plan.Regions)
+			}
+			s.admission.release(rec.Key())
 			// The server commits the 409 rejection under this idempotency key
 			// and would replay it forever — every capacity retry needs a
 			// fresh key, persisted before use.
@@ -210,10 +225,16 @@ func (s *Scaler) createVM(ctx context.Context, rec *state.Record, log logger) (*
 			if d, ok := minicontrol.RetryDelay(err); ok {
 				wait = d + time.Second
 			} else {
-				return nil, true, fmt.Errorf("create vm: %w", err)
+				if ae, ok := err.(*minicontrol.APIError); ok && ae.Status >= 400 && ae.Status < 500 {
+					return nil, false, fmt.Errorf("create vm: %w", err)
+				}
+				uncertain = true
+				// An ambiguous response may have allocated a VM. Keep its key and
+				// exact region; recovery must resolve this attempt before a new one.
+				wait = backoff
 			}
 		}
-		if time.Now().Add(wait).After(deadline) {
+		if !uncertain && time.Now().Add(wait).After(deadline) {
 			return nil, false, fmt.Errorf("gave up waiting for capacity: %w", err)
 		}
 		select {
@@ -221,8 +242,11 @@ func (s *Scaler) createVM(ctx context.Context, rec *state.Record, log logger) (*
 			return nil, false, ctx.Err()
 		case <-time.After(wait):
 		}
+		if err := s.admission.acquire(ctx, *rec); err != nil {
+			return nil, false, err
+		}
 		// While backing off, drop the VM request if the job got handled.
-		if done, err2 := s.jobAlreadyFinished(ctx, *rec); err2 == nil && done {
+		if done, err2 := s.jobAlreadyFinished(ctx, *rec); !uncertain && err2 == nil && done {
 			return nil, false, nil
 		}
 	}
@@ -536,26 +560,34 @@ func (s *Scaler) markRunning(rec *state.Record, log logger) {
 // deleteVM removes the VM with bounded retries; on persistent failure the
 // record stays in DELETING and the reconciler keeps trying. Billing stops
 // only when deletion is confirmed, so this must not silently give up.
-func (s *Scaler) deleteVM(ctx context.Context, rec *state.Record, log logger) {
+func (s *Scaler) deleteVM(ctx context.Context, rec *state.Record, log logger) error {
 	if rec.VMID == "" {
-		return
+		return nil
 	}
-	for i := 0; i < 3; i++ {
-		// Use a fresh context so shutdown doesn't abandon a delete mid-flight.
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		err := s.mc.DeleteVM(dctx, rec.VMID)
-		cancel()
-		if err == nil {
-			log.Info("vm delete issued", "vm_id", rec.VMID)
-			return
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	var lastErr error
+	for {
+		if err := s.mc.DeleteVM(dctx, rec.VMID); err != nil {
+			lastErr = err
 		}
-		log.Warn("vm delete failed", "vm_id", rec.VMID, "try", i+1, "error", err)
+		_, err := s.mc.GetVM(dctx, rec.VMID)
+		if minicontrol.IsNotFound(err) {
+			log.Info("vm deletion confirmed", "vm_id", rec.VMID)
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		}
 		select {
-		case <-time.After(2 * time.Second):
-		case <-ctx.Done():
+		case <-dctx.Done():
+			rec.State = state.StateDeleting
+			rec.LastError = fmt.Sprintf("VM deletion not confirmed: %v", lastErr)
+			s.persist(rec, log)
+			return fmt.Errorf("VM deletion not confirmed: %w", dctx.Err())
+		case <-time.After(s.cfg.MiniControl.PollInterval.D()):
 		}
 	}
-	log.Error("vm delete still failing; reconciler will keep retrying", "vm_id", rec.VMID)
 }
 
 // removeRunnerRegistration cleans up a leftover offline runner registration.
@@ -590,4 +622,11 @@ func truncate(s string, n int) string {
 		return s[:n] + "..."
 	}
 	return s
+}
+
+func (s *Scaler) createRegion(rec *state.Record) string {
+	if rec.Plan != nil {
+		return rec.Plan.Regions[rec.RegionIndex]
+	}
+	return s.cfg.MiniControl.WorkerTag
 }

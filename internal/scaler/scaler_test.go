@@ -121,7 +121,132 @@ func newHarness(t *testing.T, opts ...func(*config.Config, *fake.Server)) *harne
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	sc := scaler.New(ctx, cfg, mc, gh, store, log)
+	t.Cleanup(func() { cancel(); sc.Wait() })
 	return &harness{mc: mcSrv, gh: ghSrv, store: store, sc: sc, exec: exec, cfg: cfg}
+}
+
+func multiHarness(t *testing.T, globalLimit int) *harness {
+	t.Helper()
+	h := newHarness(t, func(cfg *config.Config, mc *fake.Server) {
+		cfg.Limits.MaxConcurrentVMs = globalLimit
+		cfg.GitHub.Accounts = map[string]config.Account{
+			"personal": {Token: "personal-token", Defaults: config.Policy{Pool: "standard"}},
+			"company":  {Token: "company-token", Defaults: config.Policy{Pool: "release"}},
+		}
+		one := 1
+		cfg.Defaults.MaxConcurrentVMs = &one
+		cfg.Pools = map[string]config.Pool{
+			"standard": {BaseImage: "example-image", SKU: "m4-big-v1", Regions: []string{"missing", "east"}, MaxConcurrentVMs: 2},
+			"release":  {SKU: "m4-big-v1", Regions: []string{"east"}, MaxConcurrentVMs: 1},
+		}
+		mc.FleetTag = "east"
+	})
+	clients := map[string]*githubapp.Client{}
+	for _, name := range h.cfg.AccountNames() {
+		clients[name], _ = githubapp.New(h.cfg.AccountGitHub(name), slog.Default())
+	}
+	if err := h.sc.ConfigureAccounts(clients); err != nil {
+		t.Fatal(err)
+	}
+	h.gh.DeniedTokens = map[string]bool{"ghp_test": true} // using the old client must fail
+	return h
+}
+
+func submitAccountJob(t *testing.T, h *harness, account, repo string, id int64) state.Key {
+	t.Helper()
+	ns := githubapp.RepositoryNamespace(h.cfg.GitHub.APIBaseURL, repo)
+	if err := h.store.BindRepository(ns, account); err != nil {
+		t.Fatal(err)
+	}
+	h.gh.SetJob(&ghfake.Job{Repo: repo, ID: id, RunID: id * 10, RunAttempt: 1, Status: "queued"})
+	ev := queuedEvent(id)
+	ev.Account = account
+	ev.Job.Repo = repo
+	h.sc.Submit(ev)
+	return state.Key{JobID: id, RunAttempt: 1, Namespace: ns}
+}
+
+func TestAccountsUseBoundCredentialsAndAllowedRegionFallback(t *testing.T) {
+	h := multiHarness(t, 2)
+	key := submitAccountJob(t, h, "personal", "acme/widgets", 701)
+	waitFor(t, "account runner", 5*time.Second, func() bool { rec, _ := h.store.Get(key); return rec.State == state.StateRunnerUp })
+	rec, _ := h.store.Get(key)
+	vm, _ := h.mc.VM(rec.VMID)
+	if rec.Plan.Account != "personal" || rec.RegionIndex != 1 || vm.Tag != "east" || vm.BaseImage != "example-image" || rec.Plan.BaseImage != "example-image" || h.mc.IdemKeyCount() != 2 {
+		t.Fatalf("wrong account/placement/retry: account=%s index=%d region=%s keys=%d", rec.Plan.Account, rec.RegionIndex, vm.Tag, h.mc.IdemKeyCount())
+	}
+	// Another token discovering this same job cannot create a second record/VM.
+	ev := queuedEvent(701)
+	ev.Account = "company"
+	h.sc.Submit(ev)
+	if len(h.store.List()) != 1 {
+		t.Fatal("duplicate account job")
+	}
+}
+
+func TestRepositoryLimitDoesNotBlockAnotherRepository(t *testing.T) {
+	h := multiHarness(t, 2)
+	first := submitAccountJob(t, h, "personal", "acme/widgets", 711)
+	waitFor(t, "first runner", 5*time.Second, func() bool { rec, _ := h.store.Get(first); return rec.State == state.StateRunnerUp })
+	second := submitAccountJob(t, h, "personal", "acme/widgets", 712)
+	third := submitAccountJob(t, h, "company", "other/project", 713)
+	waitFor(t, "other repository runner", 5*time.Second, func() bool { rec, _ := h.store.Get(third); return rec.State == state.StateRunnerUp })
+	rec, _ := h.store.Get(second)
+	if rec.VMID != "" || rec.State != state.StateQueued {
+		t.Fatalf("repository quota exceeded: %+v", rec)
+	}
+	if creates, _ := h.mc.Counts(); creates != 2 {
+		t.Fatalf("created %d VMs", creates)
+	}
+}
+
+func TestCapacityWaitReleasesGlobalReservation(t *testing.T) {
+	h := multiHarness(t, 1)
+	pool := h.cfg.Pools["standard"]
+	pool.Regions = []string{"missing"}
+	h.cfg.Pools["standard"] = pool
+	submitAccountJob(t, h, "personal", "acme/widgets", 721)
+	waitFor(t, "capacity rejection", time.Second, func() bool { return h.mc.IdemKeyCount() > 0 })
+	key := submitAccountJob(t, h, "company", "other/project", 722)
+	waitFor(t, "other pool runner", 5*time.Second, func() bool { rec, _ := h.store.Get(key); return rec.State == state.StateRunnerUp })
+	if creates, _ := h.mc.Counts(); creates != 1 {
+		t.Fatalf("created %d VMs", creates)
+	}
+}
+
+func TestRecoveryReplaysOriginalImageRegionAndKeyAfterConfigChange(t *testing.T) {
+	h := multiHarness(t, 2)
+	plan, _, _, err := h.cfg.Resolve("personal", "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Regions = []string{"east"}
+	ns := githubapp.RepositoryNamespace(plan.APIBaseURL, "acme/widgets")
+	if err := h.store.BindRepository(ns, "personal"); err != nil {
+		t.Fatal(err)
+	}
+	key := state.NewIdemKey(731, 1, 0)
+	client := minicontrol.New(h.cfg.MiniControl.BaseURL, testKey, time.Second, slog.Default())
+	vm, err := client.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: plan.SKU, Region: "east", BaseImage: plan.BaseImage}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The server created it, but the process died before saving the response.
+	rec := state.Record{Namespace: ns, Plan: &plan, Repo: "acme/widgets", JobID: 731, RunAttempt: 1, State: state.StateCreating, IdempotencyKey: key, QueuedAt: time.Now()}
+	if err := h.store.Upsert(rec); err != nil {
+		t.Fatal(err)
+	}
+	h.gh.SetJob(&ghfake.Job{ID: 731, RunID: 7310, RunAttempt: 1, Status: "queued"})
+	h.cfg.Pools["standard"] = config.Pool{SKU: "different-sku", BaseImage: "different-image", Regions: []string{"west"}, MaxConcurrentVMs: 2}
+	h.sc.Resume()
+	waitFor(t, "recovered runner", 5*time.Second, func() bool { got, _ := h.store.Get(rec.Key()); return got.State == state.StateRunnerUp })
+	got, _ := h.store.Get(rec.Key())
+	if got.VMID != vm.ID || got.IdempotencyKey != key || got.Plan.BaseImage != plan.BaseImage {
+		t.Fatal("recovery changed the persisted create request")
+	}
+	if creates, _ := h.mc.Counts(); creates != 1 {
+		t.Fatalf("recovery created %d VMs", creates)
+	}
 }
 
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {

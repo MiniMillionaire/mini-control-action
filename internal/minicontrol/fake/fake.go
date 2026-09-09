@@ -12,9 +12,10 @@ import (
 )
 
 type VM struct {
-	ID     string
-	Status string
-	SKU    string
+	BaseImage string
+	ID        string
+	Status    string
+	SKU       string
 	// Tag is what the create requested; WorkerName/WorkerTags are where the
 	// scheduler put it, exactly as the real server reports placement back.
 	Tag        string
@@ -243,8 +244,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(io2{r: r.Body, w: bodyRaw})
 	dec.DisallowUnknownFields()
 	var req struct {
-		SKU    string `json:"sku"`
-		Region string `json:"region"`
+		BaseImage string `json:"base_image"`
+		SKU       string `json:"sku"`
+		Region    string `json:"region"`
 	}
 	if err := dec.Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request: " + err.Error()})
@@ -310,6 +312,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		workerTags = []string{s.FleetTag}
 	}
 	vm := &VM{
+		BaseImage:      req.BaseImage,
 		ID:             pad(s.nextID),
 		Status:         "provisioning",
 		SKU:            req.SKU,

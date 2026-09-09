@@ -52,7 +52,11 @@ func main() {
 	log := logging.New(cfg.Log.Level, cfg.Log.Format)
 
 	mc := minicontrol.New(cfg.MiniControl.BaseURL, cfg.MiniControl.APIKey, cfg.MiniControl.RequestTimeout.D(), log)
-	gh, err := githubapp.New(cfg.GitHub, log)
+	ghConfig := cfg.GitHub
+	if names := cfg.AccountNames(); len(names) > 0 {
+		ghConfig = cfg.AccountGitHub(names[0])
+	}
+	gh, err := githubapp.New(ghConfig, log)
 	if err != nil {
 		log.Error("github client init failed", "error", err)
 		os.Exit(1)
@@ -62,9 +66,30 @@ func main() {
 	defer stop()
 
 	if *dryRun {
-		os.Exit(runDryRun(ctx, cfg, mc, gh))
+		if len(cfg.GitHub.Accounts) == 0 {
+			os.Exit(runDryRun(ctx, cfg, mc, gh))
+		}
+		result := 0
+		for _, name := range cfg.AccountNames() {
+			accountCfg := *cfg
+			accountCfg.GitHub = cfg.AccountGitHub(name)
+			plan, _, _, _ := cfg.Resolve(name, "")
+			accountCfg.MiniControl.SKU = plan.SKU
+			accountCfg.MiniControl.BaseImage = plan.BaseImage
+			accountCfg.MiniControl.WorkerTag = plan.Regions[0]
+			client, _ := githubapp.New(accountCfg.GitHub, log)
+			fmt.Println("account:", name)
+			if runDryRun(ctx, &accountCfg, mc, client) != 0 {
+				result = 1
+			}
+		}
+		os.Exit(result)
 	}
 	if *smoke {
+		if len(cfg.GitHub.Accounts) > 0 {
+			log.Error("smoke requires legacy single-pool configuration")
+			os.Exit(1)
+		}
 		os.Exit(runSmoke(ctx, cfg, mc, *smokeSKU))
 	}
 
@@ -75,8 +100,33 @@ func main() {
 	}
 
 	sc := scaler.New(ctx, cfg, mc, gh, store, log)
+	var accounts *githubapp.Accounts
+	if len(cfg.GitHub.Accounts) > 0 {
+		clients := map[string]*githubapp.Client{}
+		for _, name := range cfg.AccountNames() {
+			clients[name], _ = githubapp.New(cfg.AccountGitHub(name), log.With("account", name))
+		}
+		if err := sc.ConfigureAccounts(clients); err != nil {
+			log.Error("account recovery validation failed", "error", err)
+			os.Exit(1)
+		}
+		accounts = &githubapp.Accounts{Config: cfg, Clients: clients, Store: store, Submit: sc.Submit, Log: log}
+	} else {
+		for _, record := range store.List() {
+			if record.Plan != nil && !record.State.Terminal() {
+				log.Error("active account jobs require github.accounts configuration")
+				os.Exit(1)
+			}
+		}
+	}
 	rec := &reconciler.Reconciler{Cfg: cfg, MC: mc, GH: gh, Store: store, Scaler: sc, Log: log}
-	srv := httpserver.New(cfg, store, log)
+	srv := httpserver.New(cfg, store, log, func() any {
+		var repositories []githubapp.RepositoryStatus
+		if accounts != nil {
+			repositories = accounts.Status()
+		}
+		return map[string]any{"repositories": repositories, "waiting": sc.AdmissionStatus()}
+	})
 
 	log.Info("minicontrol-runner starting",
 		"listen", cfg.Server.Listen,
@@ -115,7 +165,11 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.Run(ctx)
+		if accounts != nil {
+			accounts.Run(ctx)
+		} else {
+			p.Run(ctx)
+		}
 	}()
 
 	<-ctx.Done()
@@ -128,7 +182,7 @@ func main() {
 
 func runDryRun(ctx context.Context, cfg *config.Config, mc *minicontrol.Client, gh *githubapp.Client) int {
 	fmt.Println("== dry run ==")
-	skus, err := mc.ListSKUs(ctx)
+	skus, err := mc.ListSKUsForPlacement(ctx, cfg.MiniControl.WorkerTag, cfg.MiniControl.BaseImage)
 	if err != nil {
 		fmt.Println("mini-control: FAILED:", err)
 		return 1
@@ -141,13 +195,7 @@ func runDryRun(ctx context.Context, cfg *config.Config, mc *minicontrol.Client, 
 			found = true
 			if !s.Available {
 				fmt.Printf("mini-control: WARNING: configured sku %s is currently unavailable\n", s.ID)
-				// Availability mirrors UNTAGGED placement, which excludes
-				// workers the server fences off by tag suffix (e.g. "*-test").
-				// A tagged create can still succeed here.
-				if cfg.MiniControl.WorkerTag != "" {
-					fmt.Printf("mini-control: NOTE: availability ignores worker_tag %q; "+
-						"tagged creates may still be placed\n", cfg.MiniControl.WorkerTag)
-				}
+
 			}
 		}
 		fmt.Printf("  %s %-14s %d cpu / %5d MiB / %d GiB  available=%v  %.4f %s/h\n",
@@ -211,7 +259,7 @@ func runSmoke(ctx context.Context, cfg *config.Config, mc *minicontrol.Client, s
 	tag := cfg.MiniControl.WorkerTag
 	fmt.Printf("== smoke test: create %s (tag %q), exec, delete (bills real money) ==\n", sku, tag)
 	idem := fmt.Sprintf("mcra-smoke-%d", time.Now().UnixNano())
-	vm, err := mc.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: sku, Region: tag}, idem)
+	vm, err := mc.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: sku, Region: tag, BaseImage: cfg.MiniControl.BaseImage}, idem)
 	if err != nil {
 		fmt.Println("create: FAILED:", err)
 		return 1

@@ -31,7 +31,8 @@ type SKU struct {
 }
 
 type CreateVMRequest struct {
-	SKU string `json:"sku"`
+	BaseImage string `json:"base_image,omitempty"`
+	SKU       string `json:"sku"`
 	// Region is an optional exact worker-tag match. Omitted from the JSON
 	// body when empty so the server places on any eligible worker. The
 	// API-key field is "region"; sending "tag" is a 400 "invalid json"

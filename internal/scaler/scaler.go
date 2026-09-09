@@ -22,9 +22,11 @@ type Scaler struct {
 	store *state.Store
 	log   *slog.Logger
 
-	ctx context.Context
-	sem chan struct{}
-	wg  sync.WaitGroup
+	ctx       context.Context
+	admission *admission
+	clients   map[string]*githubapp.Client
+	submitMu  sync.Mutex
+	wg        sync.WaitGroup
 
 	mu     sync.Mutex
 	active map[state.Key]chan githubapp.JobEvent
@@ -35,14 +37,14 @@ type Scaler struct {
 
 func New(ctx context.Context, cfg *config.Config, mc *minicontrol.Client, gh *githubapp.Client, store *state.Store, log *slog.Logger) *Scaler {
 	return &Scaler{
-		cfg:    cfg,
-		mc:     mc,
-		gh:     gh,
-		store:  store,
-		log:    log,
-		ctx:    ctx,
-		sem:    make(chan struct{}, cfg.Limits.MaxConcurrentVMs),
-		active: map[state.Key]chan githubapp.JobEvent{},
+		cfg:       cfg,
+		mc:        mc,
+		gh:        gh,
+		store:     store,
+		log:       log,
+		ctx:       ctx,
+		admission: newAdmission(cfg),
+		active:    map[state.Key]chan githubapp.JobEvent{},
 	}
 }
 
@@ -50,6 +52,8 @@ func New(ctx context.Context, cfg *config.Config, mc *minicontrol.Client, gh *gi
 // use. This is the single chokepoint where dedup keys are formed and where
 // dispatch policy lives.
 func (s *Scaler) Submit(ev githubapp.JobEvent) {
+	s.submitMu.Lock()
+	defer s.submitMu.Unlock()
 	if ev.Job.RunAttempt < 1 {
 		ev.Job.RunAttempt = 1 // run_attempt is not schema-required; keep dedup keys stable
 	}
@@ -59,7 +63,23 @@ func (s *Scaler) Submit(ev githubapp.JobEvent) {
 		s.log.Info("job waiting on approval; not provisioning", "job_id", ev.Job.JobID)
 		return
 	}
-	key := state.Key{JobID: ev.Job.JobID, RunAttempt: ev.Job.RunAttempt}
+	namespace := ""
+	var plan *config.Plan
+	if ev.Account != "" {
+		resolved, _, paused, err := s.cfg.Resolve(ev.Account, ev.Job.Repo)
+		if err != nil || paused {
+			return
+		}
+		if !githubapp.LabelsSatisfiable(ev.Job.Labels, resolved.Runner.Labels) {
+			return
+		}
+		namespace = githubapp.RepositoryNamespace(resolved.APIBaseURL, ev.Job.Repo)
+		if s.store.RepositoryOwner(namespace) != ev.Account {
+			return
+		}
+		plan = &resolved
+	}
+	key := state.Key{JobID: ev.Job.JobID, RunAttempt: ev.Job.RunAttempt, Namespace: namespace}
 
 	s.mu.Lock()
 	ch, isActive := s.active[key]
@@ -82,6 +102,7 @@ func (s *Scaler) Submit(ev githubapp.JobEvent) {
 			return
 		}
 		rec := state.Record{
+			Namespace: namespace, Plan: plan,
 			JobID:      ev.Job.JobID,
 			RunAttempt: ev.Job.RunAttempt,
 			Repo:       ev.Job.Repo,
@@ -106,6 +127,7 @@ func (s *Scaler) Submit(ev githubapp.JobEvent) {
 
 // Resume re-attaches workers to every non-terminal record (startup recovery).
 func (s *Scaler) Resume() {
+	s.admission.seed(s.store.List())
 	for _, rec := range s.store.List() {
 		if !rec.State.Terminal() {
 			s.log.Info("resuming job from state file", "job_id", rec.JobID, "state", rec.State, "vm_id", rec.VMID)
@@ -148,7 +170,16 @@ func (s *Scaler) spawn(rec state.Record) {
 			delete(s.active, key)
 			s.mu.Unlock()
 		}()
-		s.runJob(s.ctx, rec, ch)
+		worker := s
+		if rec.Plan != nil {
+			cfg := *s.cfg
+			cfg.Runner = rec.Plan.Runner
+			cfg.MiniControl.SKU = rec.Plan.SKU
+			cfg.MiniControl.BaseImage = rec.Plan.BaseImage
+			cfg.MiniControl.WorkerTag = rec.Plan.Regions[rec.RegionIndex]
+			worker = &Scaler{cfg: &cfg, mc: s.mc, gh: s.clients[rec.Plan.Account], store: s.store, log: s.log.With("account", rec.Plan.Account, "pool", rec.Plan.Pool), admission: s.admission}
+		}
+		worker.runJob(s.ctx, rec, ch)
 	}()
 }
 

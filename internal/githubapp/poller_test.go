@@ -41,7 +41,7 @@ func TestPollSkipsQuietRepoOutsideActiveWindow(t *testing.T) {
 	p := &Poller{
 		Client: testPollerClient(t, srv), DiscoverRepos: true,
 		ActiveWindow: 2 * time.Hour, MaxRepos: 10, OurLabels: labels(),
-		Log: slog.Default(),
+		Log:    slog.Default(),
 		Submit: func(ev JobEvent) { got = append(got, ev.Job) },
 	}
 	p.poll(context.Background())
@@ -60,7 +60,7 @@ func TestPollPicksRerunOnKnownQuietRepo(t *testing.T) {
 	p := &Poller{
 		Client: testPollerClient(t, srv), DiscoverRepos: true,
 		ActiveWindow: 2 * time.Hour, MaxRepos: 10, OurLabels: labels(),
-		Log: slog.Default(),
+		Log:        slog.Default(),
 		ExtraRepos: func() []string { return []string{"acme/widgets"} },
 		Submit:     func(ev JobEvent) { got = append(got, ev.Job) },
 	}

@@ -24,17 +24,17 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, ok := s2.Get(Key{42, 1})
+	got, ok := s2.Get(Key{JobID: 42, RunAttempt: 1})
 	if !ok || got.VMID != "vm-a" || got.State != StateWaitReady {
 		t.Fatalf("reload mismatch: %+v ok=%v", got, ok)
 	}
 	if !s2.HasVM("vm-a") || s2.HasVM("vm-b") {
 		t.Fatal("HasVM wrong")
 	}
-	if err := s2.Delete(Key{42, 1}); err != nil {
+	if err := s2.Delete(Key{JobID: 42, RunAttempt: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s2.Get(Key{42, 1}); ok {
+	if _, ok := s2.Get(Key{JobID: 42, RunAttempt: 1}); ok {
 		t.Fatal("record survived delete")
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,10 +130,26 @@ func (c *Client) doLimited(ctx context.Context, method, path string, body any, h
 }
 
 func (c *Client) ListSKUs(ctx context.Context) ([]SKU, error) {
+	return c.ListSKUsForPlacement(ctx, "", "")
+}
+
+// ListSKUsForPlacement asks the server about this region/image combination.
+func (c *Client) ListSKUsForPlacement(ctx context.Context, region, baseImage string) ([]SKU, error) {
+	query := url.Values{}
+	if region != "" {
+		query.Set("region", region)
+	}
+	if baseImage != "" {
+		query.Set("base_image", baseImage)
+	}
+	path := "/skus"
+	if len(query) > 0 {
+		path += "?" + query.Encode()
+	}
 	var out struct {
 		SKUs []SKU `json:"skus"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/skus", nil, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
 		return nil, err
 	}
 	return out.SKUs, nil

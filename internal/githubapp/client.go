@@ -109,6 +109,7 @@ type Client struct {
 	repoAt    time.Time
 
 	runMu      sync.Mutex
+	runQueued  map[int64][]JobRef
 	runUpdated map[int64]string // run ID -> last seen updated_at; gates /jobs fetches
 }
 
@@ -135,6 +136,7 @@ func New(cfg config.GitHub, log *slog.Logger) (*Client, error) {
 		httpc:        &http.Client{Timeout: 30 * time.Second},
 		log:          log,
 		runUpdated:   map[int64]string{},
+		runQueued:    map[int64][]JobRef{},
 	}, nil
 }
 
@@ -244,6 +246,9 @@ func (c *Client) ListAccessibleRepos(ctx context.Context) ([]RepoInfo, error) {
 		if len(repos) < 100 {
 			break
 		}
+		if page == 10 {
+			return nil, fmt.Errorf("repository listing exceeds 1000 candidates; narrow token access")
+		}
 	}
 	c.repoCache = infos
 	c.repoAt = time.Now()
@@ -334,14 +339,22 @@ func (c *Client) GetJobStatus(ctx context.Context, ref JobRef) (JobStatus, error
 // updated_at moved since the last cycle, so long-lived in_progress runs cost
 // nothing in steady state. One broken repo does not abort the sweep.
 func (c *Client) ListQueuedJobs(ctx context.Context, repos []string, ourLabels []string) ([]JobRef, error) {
+	refs, _, err := c.listQueuedJobsWithErrors(ctx, repos, ourLabels)
+	return refs, err
+}
+
+func (c *Client) listQueuedJobsWithErrors(ctx context.Context, repos []string, ourLabels []string) ([]JobRef, map[string]error, error) {
+	failures := map[string]error{}
+
 	var refs []JobRef
 	liveRuns := map[int64]bool{}
 	for _, repo := range repos {
 		repoRefs, err := c.listQueuedJobsInRepo(ctx, repo, ourLabels, liveRuns)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, err
+				return nil, failures, err
 			}
+			failures[repo] = err
 			c.log.Warn("queued-job discovery failed for repo; skipping it this cycle", "repo", repo, "error", err)
 			continue
 		}
@@ -352,10 +365,11 @@ func (c *Client) ListQueuedJobs(ctx context.Context, repos []string, ourLabels [
 	for id := range c.runUpdated {
 		if !liveRuns[id] {
 			delete(c.runUpdated, id)
+			delete(c.runQueued, id)
 		}
 	}
 	c.runMu.Unlock()
-	return refs, nil
+	return refs, failures, nil
 }
 
 func (c *Client) listQueuedJobsInRepo(ctx context.Context, repo string, ourLabels []string, liveRuns map[int64]bool) ([]JobRef, error) {
@@ -379,6 +393,9 @@ func (c *Client) listQueuedJobsInRepo(ctx context.Context, repo string, ourLabel
 				liveRuns[run.ID] = true
 				c.runMu.Lock()
 				unchanged := c.runUpdated[run.ID] == run.UpdatedAt && run.UpdatedAt != ""
+				if unchanged {
+					refs = append(refs, c.runQueued[run.ID]...)
+				}
 				c.runMu.Unlock()
 				if unchanged {
 					continue // nothing new since last cycle; skip the /jobs fetch
@@ -390,6 +407,7 @@ func (c *Client) listQueuedJobsInRepo(ctx context.Context, repo string, ourLabel
 				refs = append(refs, jobRefs...)
 				c.runMu.Lock()
 				c.runUpdated[run.ID] = run.UpdatedAt
+				c.runQueued[run.ID] = jobRefs
 				c.runMu.Unlock()
 			}
 			if len(runs.WorkflowRuns) < 100 {

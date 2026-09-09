@@ -115,8 +115,16 @@ func (r *Reconciler) Sweep(ctx context.Context) {
 					continue
 				}
 			}
+			if rec.VMID != "" {
+				_, err := r.MC.GetVM(ctx, rec.VMID)
+				if !minicontrol.IsNotFound(err) {
+					continue
+				}
+			}
 			rec.State = state.StateComplete
-			_ = r.Store.Upsert(rec)
+			if err := r.Store.Upsert(rec); err == nil {
+				r.Scaler.ReleaseReservation(rec.Key())
+			}
 		default:
 			if !r.Scaler.Active(rec.Key()) {
 				r.Log.Info("reconciler: re-adopting unowned job", "job_id", rec.JobID, "state", rec.State)
@@ -126,7 +134,11 @@ func (r *Reconciler) Sweep(ctx context.Context) {
 	}
 
 	// 4. Stale runner registrations.
-	r.cleanRunners(ctx, live)
+	if len(r.Cfg.GitHub.Accounts) > 0 {
+		r.cleanAccountRunners(ctx)
+	} else {
+		r.cleanRunners(ctx, live)
+	}
 }
 
 func (r *Reconciler) cleanRunners(ctx context.Context, liveVMs map[string]bool) {
@@ -190,5 +202,30 @@ func (r *Reconciler) runnerScopes(ctx context.Context) []string {
 			}
 		}
 		return repos
+	}
+}
+
+// Multi-account cleanup uses persisted runner IDs and credentials. Prefixes
+// alone are not ownership evidence across independent registration scopes.
+func (r *Reconciler) cleanAccountRunners(ctx context.Context) {
+	for _, rec := range r.Store.List() {
+		if rec.Plan == nil || rec.RunnerID == 0 || !rec.State.Terminal() {
+			continue
+		}
+		client := r.Scaler.GitHubForRecord(rec)
+		if client == nil {
+			continue
+		}
+		runners, err := client.ListRunners(ctx, rec.Repo)
+		if err != nil {
+			continue
+		}
+		for _, runner := range runners {
+			if runner.ID == rec.RunnerID && runner.Name == rec.RunnerName && runner.Reapable() {
+				if err := client.RemoveRunner(ctx, rec.Repo, runner.ID); err != nil {
+					r.Log.Warn("remove stale account runner", "account", rec.Plan.Account, "repo", rec.Repo, "error", err)
+				}
+			}
+		}
 	}
 }
