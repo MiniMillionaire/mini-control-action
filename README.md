@@ -86,9 +86,13 @@ repository overrides. Set `pool`, `max_concurrent_vms`, `max_job_duration`,
 its pool's regions. Region lists replace inherited lists; they never merge.
 Account and pool pauses cannot be overridden by a repository.
 
-Pools specify `sku`, optional `base_image` (exact catalog name), ordered `regions`, and `max_concurrent_vms`. Explicit
+Pools specify `sku`, optional `base_image` (exact catalog name) or an ordered
+`base_images` fallback list, ordered `regions`, and `max_concurrent_vms`. Explicit
 capacity rejection advances to the next permitted region with a fresh durable
-idempotency key. A single region keeps retrying there. No capacity fallback
+idempotency key; once every region has rejected an image, the next image is
+tried, wrapping back to the first. Missing or unsynced images are 409
+rejections too (`base_image_not_found`, `base_image_not_ready`), so they fall
+back the same way. A single region keeps retrying there. No capacity fallback
 removes placement constraints. `any_region: true` is a separate explicit choice
 and cannot be combined with `regions`. Transport failures retain the same
 request and key until its outcome is known. Worker placement is logged.

@@ -574,3 +574,30 @@ func TestReadyWithoutCredentialsWaits(t *testing.T) {
 		return ok && (rec.State == state.StateRunnerUp || rec.State == state.StateJobRunning)
 	})
 }
+
+func TestBaseImageFallbackAfterRegionsAreExhausted(t *testing.T) {
+	h := multiHarness(t, 2)
+	h.cfg.Pools["standard"] = config.Pool{BaseImages: []string{"preferred", "fallback"}, SKU: "m4-big-v1", Regions: []string{"missing", "east"}, MaxConcurrentVMs: 2}
+	h.mc.FleetImages = []string{"fallback"}
+	key := submitAccountJob(t, h, "personal", "acme/widgets", 702)
+	waitFor(t, "fallback runner", 10*time.Second, func() bool { rec, _ := h.store.Get(key); return rec.State == state.StateRunnerUp })
+	rec, _ := h.store.Get(key)
+	vm, _ := h.mc.VM(rec.VMID)
+	// preferred@missing, preferred@east, fallback@missing, fallback@east.
+	if vm.BaseImage != "fallback" || vm.Tag != "east" || rec.ImageIndex != 1 || rec.RegionIndex != 1 || h.mc.IdemKeyCount() != 4 {
+		t.Fatalf("wrong fallback: image=%s region=%s indexes=%d/%d keys=%d", vm.BaseImage, vm.Tag, rec.ImageIndex, rec.RegionIndex, h.mc.IdemKeyCount())
+	}
+}
+
+func TestBaseImagesPreferFirstWhenAvailable(t *testing.T) {
+	h := multiHarness(t, 2)
+	h.cfg.Pools["standard"] = config.Pool{BaseImages: []string{"preferred", "fallback"}, SKU: "m4-big-v1", Regions: []string{"east"}, MaxConcurrentVMs: 2}
+	h.mc.FleetImages = []string{"preferred", "fallback"}
+	key := submitAccountJob(t, h, "personal", "acme/widgets", 703)
+	waitFor(t, "preferred runner", 5*time.Second, func() bool { rec, _ := h.store.Get(key); return rec.State == state.StateRunnerUp })
+	rec, _ := h.store.Get(key)
+	vm, _ := h.mc.VM(rec.VMID)
+	if vm.BaseImage != "preferred" || rec.ImageIndex != 0 || h.mc.IdemKeyCount() != 1 {
+		t.Fatalf("preferred image skipped: image=%s index=%d keys=%d", vm.BaseImage, rec.ImageIndex, h.mc.IdemKeyCount())
+	}
+}

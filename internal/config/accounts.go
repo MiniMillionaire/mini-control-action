@@ -25,6 +25,7 @@ type Account struct {
 
 type Pool struct {
 	BaseImage        string   `yaml:"base_image"`
+	BaseImages       []string `yaml:"base_images"` // ordered fallback; excludes base_image
 	SKU              string   `yaml:"sku"`
 	Regions          []string `yaml:"regions"`
 	AnyRegion        bool     `yaml:"any_region"`
@@ -45,6 +46,7 @@ type Policy struct {
 // pause flags are admission policy, so lowering them also affects queued work.
 type Plan struct {
 	BaseImage     string   `json:"base_image,omitempty"`
+	BaseImages    []string `json:"base_images,omitempty"`
 	Account       string   `json:"account"`
 	APIBaseURL    string   `json:"api_base_url"`
 	Pool          string   `json:"pool"`
@@ -52,6 +54,15 @@ type Plan struct {
 	Regions       []string `json:"regions"`
 	Runner        Runner   `json:"runner"`
 	RunnerGroupID int64    `json:"runner_group_id"`
+}
+
+// Images lists the create candidates in preference order. A single-image plan,
+// including ones persisted before base_images existed, has exactly one.
+func (p Plan) Images() []string {
+	if len(p.BaseImages) > 0 {
+		return p.BaseImages
+	}
+	return []string{p.BaseImage}
 }
 
 func (c *Config) AccountNames() []string {
@@ -169,7 +180,7 @@ func (c *Config) Resolve(account, repo string) (Plan, int, bool, error) {
 		return Plan{}, 0, false, fmt.Errorf("max_job_duration must be positive")
 	}
 	paused := a.Paused || pool.Paused || !a.Includes(repo) || (p.Paused != nil && *p.Paused)
-	return Plan{BaseImage: pool.BaseImage, Account: account, APIBaseURL: c.AccountGitHub(account).APIBaseURL, Pool: p.Pool, SKU: pool.SKU, Regions: append([]string(nil), regions...), Runner: runner, RunnerGroupID: c.GitHub.RunnerGroupID}, limit, paused, nil
+	return Plan{BaseImage: pool.BaseImage, BaseImages: append([]string(nil), pool.BaseImages...), Account: account, APIBaseURL: c.AccountGitHub(account).APIBaseURL, Pool: p.Pool, SKU: pool.SKU, Regions: append([]string(nil), regions...), Runner: runner, RunnerGroupID: c.GitHub.RunnerGroupID}, limit, paused, nil
 }
 
 func (c *Config) validateAccounts() error {
@@ -183,8 +194,18 @@ func (c *Config) validateAccounts() error {
 		return fmt.Errorf("github.poll.interval must be positive")
 	}
 	for name, p := range c.Pools {
-		if p.BaseImage != "" && (len(p.BaseImage) > 128 || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`).MatchString(p.BaseImage)) {
+		if p.BaseImage != "" && !validImageName(p.BaseImage) {
 			return fmt.Errorf("pool %q has invalid base_image", name)
+		}
+		if p.BaseImage != "" && len(p.BaseImages) > 0 {
+			return fmt.Errorf("pool %q cannot set both base_image and base_images", name)
+		}
+		seenImages := map[string]bool{}
+		for _, image := range p.BaseImages {
+			if !validImageName(image) || seenImages[image] {
+				return fmt.Errorf("pool %q has invalid or duplicate base_images entry %q", name, image)
+			}
+			seenImages[image] = true
 		}
 		if name == "" || p.SKU == "" || p.MaxConcurrentVMs < 1 {
 			return fmt.Errorf("pool %q requires sku and max_concurrent_vms >= 1", name)
@@ -237,4 +258,8 @@ func (c *Config) validateAccounts() error {
 		}
 	}
 	return nil
+}
+
+func validImageName(name string) bool {
+	return len(name) <= 128 && regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`).MatchString(name)
 }

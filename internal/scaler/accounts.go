@@ -35,6 +35,9 @@ func (s *Scaler) ConfigureAccounts(clients map[string]*githubapp.Client) error {
 		if len(plan.Regions) == 0 || rec.RegionIndex < 0 || rec.RegionIndex >= len(plan.Regions) {
 			return fmt.Errorf("invalid persisted region for job %d", rec.JobID)
 		}
+		if rec.ImageIndex < 0 || rec.ImageIndex >= len(plan.Images()) {
+			return fmt.Errorf("invalid persisted base image for job %d", rec.JobID)
+		}
 	}
 	s.clients = clients
 	return nil

@@ -175,7 +175,7 @@ func (s *Scaler) spawn(rec state.Record) {
 			cfg := *s.cfg
 			cfg.Runner = rec.Plan.Runner
 			cfg.MiniControl.SKU = rec.Plan.SKU
-			cfg.MiniControl.BaseImage = rec.Plan.BaseImage
+			cfg.MiniControl.BaseImage = rec.Plan.Images()[rec.ImageIndex]
 			cfg.MiniControl.WorkerTag = rec.Plan.Regions[rec.RegionIndex]
 			worker = &Scaler{cfg: &cfg, mc: s.mc, gh: s.clients[rec.Plan.Account], store: s.store, log: s.log.With("account", rec.Plan.Account, "pool", rec.Plan.Pool), admission: s.admission}
 		}

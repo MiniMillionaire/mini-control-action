@@ -63,11 +63,30 @@ func TestAccountPolicyRejectsAmbiguousOrWiderSettings(t *testing.T) {
 		"empty token":          strings.Replace(multiConfig, "test-company", "\"\"", 1),
 		"duplicate repository": strings.Replace(multiConfig, "token: test-company", "token: test-company\n      repositories:\n        EXAMPLE/RELEASE: {}", 1),
 		"unknown field":        strings.Replace(multiConfig, "token: test-company", "token: test-company\n      typo: true", 1),
+		"image and images":     strings.Replace(multiConfig, "regions: [east]", "regions: [east]\n    base_image: a\n    base_images: [b]", 1),
+		"duplicate images":     strings.Replace(multiConfig, "regions: [east]", "regions: [east]\n    base_images: [a, a]", 1),
+		"invalid image":        strings.Replace(multiConfig, "regions: [east]", "regions: [east]\n    base_images: [\"bad image\"]", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load(writeConfig(t, body)); err == nil {
 				t.Fatal("invalid configuration accepted")
 			}
 		})
+	}
+}
+
+func TestPoolBaseImagesResolveInOrder(t *testing.T) {
+	body := strings.Replace(multiConfig, "regions: [east]", "regions: [east]\n    base_images: [preferred, fallback]", 1)
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, _, _, err := cfg.Resolve("personal", "example/release")
+	if err != nil || strings.Join(plan.Images(), ",") != "preferred,fallback" {
+		t.Fatalf("unexpected images: %v %v", plan.Images(), err)
+	}
+	plan, _, _, _ = cfg.Resolve("personal", "example/new")
+	if images := plan.Images(); len(images) != 1 || images[0] != "" {
+		t.Fatalf("pool without images must keep the server default: %v", images)
 	}
 }

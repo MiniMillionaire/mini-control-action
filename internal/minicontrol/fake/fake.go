@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -43,6 +44,7 @@ type Server struct {
 	// Knobs (set before use; guarded by mu for mid-test changes).
 	RejectTag       bool     // 400 on create when body has a region field
 	FleetTag        string   // the tag this fake's only worker carries
+	FleetImages     []string // when set, the only base images the catalog holds
 	WorkerName      string   // placement reported back; defaults to fake-worker-01
 	CapacityReason  string   // when set, creates fail 409 with this reason_code
 	Inject429       int      // number of creates to reject with 429 before succeeding
@@ -283,6 +285,16 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if s.CapacityReason != "" {
 		resp, _ := json.Marshal(map[string]any{"error": "no_matching_candidate", "reason_code": s.CapacityReason})
 		// The real server commits the rejection under the key and replays it.
+		s.idempotency[idem] = idemRecord{body: bodyRaw.String(), status: 409, resp: resp}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(409)
+		_, _ = w.Write(resp)
+		return
+	}
+	if s.FleetImages != nil && !slices.Contains(s.FleetImages, req.BaseImage) {
+		resp, _ := json.Marshal(map[string]any{
+			"error": "no_matching_candidate", "reason_code": "base_image_not_found",
+		})
 		s.idempotency[idem] = idemRecord{body: bodyRaw.String(), status: 409, resp: resp}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(409)

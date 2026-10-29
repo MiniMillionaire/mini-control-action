@@ -106,7 +106,7 @@ func (s *Scaler) attempt(ctx context.Context, rec *state.Record, events chan git
 		s.persist(rec, log)
 		log.Info("vm created", "vm_id", vm.ID, "status", vm.Status,
 			"worker", vm.WorkerName, "worker_tags", vm.WorkerTags,
-			"requested_tag", s.createRegion(rec), "base_image", s.cfg.MiniControl.BaseImage)
+			"requested_tag", s.createRegion(rec), "base_image", s.createImage(rec))
 	}
 
 	// failCleanup deletes the VM after a genuine failure — but NOT on
@@ -196,7 +196,7 @@ func (s *Scaler) createVM(ctx context.Context, rec *state.Record, log logger) (*
 	uncertain := false
 	for {
 		vm, err := s.mc.CreateVM(ctx, minicontrol.CreateVMRequest{
-			BaseImage: s.cfg.MiniControl.BaseImage,
+			BaseImage: s.createImage(rec),
 			SKU:       s.cfg.MiniControl.SKU,
 			Region:    s.createRegion(rec),
 		}, rec.IdempotencyKey)
@@ -207,11 +207,17 @@ func (s *Scaler) createVM(ctx context.Context, rec *state.Record, log logger) (*
 		switch {
 		case minicontrol.IsCapacity(err):
 			uncertain = false
-			log.Warn("no capacity, backing off", "error", err, "backoff", backoff)
+			log.Warn("no capacity, backing off", "error", err, "backoff", backoff,
+				"requested_tag", s.createRegion(rec), "base_image", s.createImage(rec))
 			wait = backoff
 			backoff = min(backoff*2, s.cfg.Limits.CapacityBackoff.Max.D())
 			if rec.Plan != nil {
+				// Every region is tried for an image before falling back to the
+				// next image; exhausting all images wraps to the preferred one.
 				rec.RegionIndex = (rec.RegionIndex + 1) % len(rec.Plan.Regions)
+				if rec.RegionIndex == 0 {
+					rec.ImageIndex = (rec.ImageIndex + 1) % len(rec.Plan.Images())
+				}
 			}
 			s.admission.release(rec.Key())
 			// The server commits the 409 rejection under this idempotency key
@@ -629,4 +635,11 @@ func (s *Scaler) createRegion(rec *state.Record) string {
 		return rec.Plan.Regions[rec.RegionIndex]
 	}
 	return s.cfg.MiniControl.WorkerTag
+}
+
+func (s *Scaler) createImage(rec *state.Record) string {
+	if rec.Plan != nil {
+		return rec.Plan.Images()[rec.ImageIndex]
+	}
+	return s.cfg.MiniControl.BaseImage
 }

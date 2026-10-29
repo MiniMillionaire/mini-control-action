@@ -75,7 +75,7 @@ func main() {
 			accountCfg.GitHub = cfg.AccountGitHub(name)
 			plan, _, _, _ := cfg.Resolve(name, "")
 			accountCfg.MiniControl.SKU = plan.SKU
-			accountCfg.MiniControl.BaseImage = plan.BaseImage
+			accountCfg.MiniControl.BaseImage = plan.Images()[0]
 			accountCfg.MiniControl.WorkerTag = plan.Regions[0]
 			client, _ := githubapp.New(accountCfg.GitHub, log)
 			fmt.Println("account:", name)
