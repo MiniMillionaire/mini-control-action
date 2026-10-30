@@ -17,6 +17,8 @@ minicontrol:
   base_url: https://example.test/api/client/v1
   api_key: "${TEST_MC_KEY}"
   sku: m4-big-v1
+  base_image: example-image
+  worker_tag: east
 `
 
 func writeConfig(t *testing.T, body string) string {
@@ -60,6 +62,9 @@ func TestValidateRejects(t *testing.T) {
 	}{
 		{"bad key prefix", strings.Replace(minimal, "${TEST_MC_KEY}", "notakey", 1), "mck_-prefixed"},
 		{"missing sku", strings.Replace(minimal, "sku: m4-big-v1", "sku: \"\"", 1), "sku is required"},
+		{"missing base image", strings.Replace(minimal, "  base_image: example-image\n", "", 1), "base_image is required"},
+		{"missing worker tag", strings.Replace(minimal, "  worker_tag: east\n", "", 1), "worker_tag is required"},
+		{"worker tag list", strings.Replace(minimal, "worker_tag: east", "worker_tag: \"east,west\"", 1), "worker_tag is required"},
 		{"unknown field", minimal + "\nnot_a_field: true\n", "not_a_field"},
 	}
 	for _, tc := range cases {

@@ -2,6 +2,7 @@ package scaler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -106,7 +107,7 @@ func (s *Scaler) attempt(ctx context.Context, rec *state.Record, events chan git
 		s.persist(rec, log)
 		log.Info("vm created", "vm_id", vm.ID, "status", vm.Status,
 			"worker", vm.WorkerName, "worker_tags", vm.WorkerTags,
-			"requested_tag", s.createRegion(rec), "base_image", s.createImage(rec))
+			"requested_tag", s.cfg.MiniControl.WorkerTag, "base_image", s.cfg.MiniControl.BaseImage)
 	}
 
 	// failCleanup deletes the VM after a genuine failure — but NOT on
@@ -196,29 +197,25 @@ func (s *Scaler) createVM(ctx context.Context, rec *state.Record, log logger) (*
 	uncertain := false
 	for {
 		vm, err := s.mc.CreateVM(ctx, minicontrol.CreateVMRequest{
-			BaseImage: s.createImage(rec),
+			BaseImage: s.cfg.MiniControl.BaseImage,
 			SKU:       s.cfg.MiniControl.SKU,
-			Region:    s.createRegion(rec),
+			Region:    s.cfg.MiniControl.WorkerTag,
 		}, rec.IdempotencyKey)
 		if err == nil {
 			return vm, false, nil
 		}
 		var wait time.Duration
 		switch {
+		case errors.Is(err, minicontrol.ErrIncompleteCreate):
+			return nil, false, fmt.Errorf("create vm: %w", err)
 		case minicontrol.IsCapacity(err):
 			uncertain = false
+			// The same image, SKU, and region are retried; a rejection never
+			// moves the job to another image or placement.
 			log.Warn("no capacity, backing off", "error", err, "backoff", backoff,
-				"requested_tag", s.createRegion(rec), "base_image", s.createImage(rec))
+				"requested_tag", s.cfg.MiniControl.WorkerTag, "base_image", s.cfg.MiniControl.BaseImage)
 			wait = backoff
 			backoff = min(backoff*2, s.cfg.Limits.CapacityBackoff.Max.D())
-			if rec.Plan != nil {
-				// Every region is tried for an image before falling back to the
-				// next image; exhausting all images wraps to the preferred one.
-				rec.RegionIndex = (rec.RegionIndex + 1) % len(rec.Plan.Regions)
-				if rec.RegionIndex == 0 {
-					rec.ImageIndex = (rec.ImageIndex + 1) % len(rec.Plan.Images())
-				}
-			}
 			s.admission.release(rec.Key())
 			// The server commits the 409 rejection under this idempotency key
 			// and would replay it forever — every capacity retry needs a
@@ -628,18 +625,4 @@ func truncate(s string, n int) string {
 		return s[:n] + "..."
 	}
 	return s
-}
-
-func (s *Scaler) createRegion(rec *state.Record) string {
-	if rec.Plan != nil {
-		return rec.Plan.Regions[rec.RegionIndex]
-	}
-	return s.cfg.MiniControl.WorkerTag
-}
-
-func (s *Scaler) createImage(rec *state.Record) string {
-	if rec.Plan != nil {
-		return rec.Plan.Images()[rec.ImageIndex]
-	}
-	return s.cfg.MiniControl.BaseImage
 }

@@ -1,6 +1,7 @@
 package minicontrol
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -30,15 +31,18 @@ type SKU struct {
 	} `json:"price"`
 }
 
+// CreateVMRequest always names its image and region. The server would treat
+// an omitted base_image as its configured default and an omitted region as
+// "any eligible worker"; this service relies on neither, so CreateVM refuses a
+// request missing either one. The API-key field is "region"; sending "tag" is
+// a 400 "invalid json" (unknown field) and the create fails.
+// ErrIncompleteCreate rejects a create before it is sent; it is permanent.
+var ErrIncompleteCreate = errors.New("create requires an explicit sku, base_image, and region")
+
 type CreateVMRequest struct {
-	BaseImage string `json:"base_image,omitempty"`
+	BaseImage string `json:"base_image"`
 	SKU       string `json:"sku"`
-	// Region is an optional exact worker-tag match. Omitted from the JSON
-	// body when empty so the server places on any eligible worker. The
-	// API-key field is "region"; sending "tag" is a 400 "invalid json"
-	// (unknown field) and the create fails — the constraint is never
-	// silently dropped.
-	Region string `json:"region,omitempty"`
+	Region    string `json:"region"`
 }
 
 type VM struct {

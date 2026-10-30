@@ -24,7 +24,7 @@ func TestAccountsDiscoverQuietReposAndPersistExplicitOwnership(t *testing.T) {
 			"first":  {Token: "first", Exclude: []string{"acme/ignored"}, Defaults: config.Policy{Pool: "default"}},
 			"second": {Token: "second", Exclude: []string{"acme/ignored"}, Defaults: config.Policy{Pool: "default"}, Repositories: map[string]config.Policy{"acme/widgets": {}}},
 		}},
-		Pools:  map[string]config.Pool{"default": {SKU: "m4-big-v1", Regions: []string{"east"}, MaxConcurrentVMs: 2}},
+		Pools:  map[string]config.Pool{"default": {SKU: "m4-big-v1", BaseImage: "example-image", Region: "east", MaxConcurrentVMs: 2}},
 		Runner: config.Runner{Labels: labels(), MaxJobDuration: config.Duration(time.Hour)}, Limits: config.Limits{MaxConcurrentVMs: 2},
 	}
 	storePath := filepath.Join(t.TempDir(), "state.json")

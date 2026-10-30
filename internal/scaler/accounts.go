@@ -32,11 +32,10 @@ func (s *Scaler) ConfigureAccounts(clients map[string]*githubapp.Client) error {
 		if _, ok := s.cfg.Pools[plan.Pool]; !ok {
 			return fmt.Errorf("active job requires missing pool %q", plan.Pool)
 		}
-		if len(plan.Regions) == 0 || rec.RegionIndex < 0 || rec.RegionIndex >= len(plan.Regions) {
-			return fmt.Errorf("invalid persisted region for job %d", rec.JobID)
-		}
-		if rec.ImageIndex < 0 || rec.ImageIndex >= len(plan.Images()) {
-			return fmt.Errorf("invalid persisted base image for job %d", rec.JobID)
+		// A plan persisted before pools named one image and one region has
+		// neither; resuming it would create with no placement at all.
+		if plan.Region == "" || plan.BaseImage == "" {
+			return fmt.Errorf("active job %d has no persisted base image and region; drain it before upgrading", rec.JobID)
 		}
 	}
 	s.clients = clients

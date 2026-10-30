@@ -23,20 +23,20 @@ type Account struct {
 	Repositories map[string]Policy `yaml:"repositories"`
 }
 
+// A pool names exactly one image, SKU, and region. There is no fallback: a
+// create that cannot be placed there waits and retries there, never somewhere
+// or something else.
 type Pool struct {
-	BaseImage        string   `yaml:"base_image"`
-	BaseImages       []string `yaml:"base_images"` // ordered fallback; excludes base_image
-	SKU              string   `yaml:"sku"`
-	Regions          []string `yaml:"regions"`
-	AnyRegion        bool     `yaml:"any_region"`
-	MaxConcurrentVMs int      `yaml:"max_concurrent_vms"`
-	Paused           bool     `yaml:"paused"`
+	BaseImage        string `yaml:"base_image"`
+	SKU              string `yaml:"sku"`
+	Region           string `yaml:"region"`
+	MaxConcurrentVMs int    `yaml:"max_concurrent_vms"`
+	Paused           bool   `yaml:"paused"`
 }
 
 // Pointers distinguish inherited settings from explicit zero/false values.
 type Policy struct {
 	Pool             string   `yaml:"pool"`
-	Regions          []string `yaml:"regions"`
 	MaxConcurrentVMs *int     `yaml:"max_concurrent_vms"`
 	MaxJobDuration   Duration `yaml:"max_job_duration"`
 	Paused           *bool    `yaml:"paused"`
@@ -45,24 +45,14 @@ type Policy struct {
 // Plan freezes non-secret execution settings for recovery. Current limits and
 // pause flags are admission policy, so lowering them also affects queued work.
 type Plan struct {
-	BaseImage     string   `json:"base_image,omitempty"`
-	BaseImages    []string `json:"base_images,omitempty"`
-	Account       string   `json:"account"`
-	APIBaseURL    string   `json:"api_base_url"`
-	Pool          string   `json:"pool"`
-	SKU           string   `json:"sku"`
-	Regions       []string `json:"regions"`
-	Runner        Runner   `json:"runner"`
-	RunnerGroupID int64    `json:"runner_group_id"`
-}
-
-// Images lists the create candidates in preference order. A single-image plan,
-// including ones persisted before base_images existed, has exactly one.
-func (p Plan) Images() []string {
-	if len(p.BaseImages) > 0 {
-		return p.BaseImages
-	}
-	return []string{p.BaseImage}
+	BaseImage     string `json:"base_image"`
+	Account       string `json:"account"`
+	APIBaseURL    string `json:"api_base_url"`
+	Pool          string `json:"pool"`
+	SKU           string `json:"sku"`
+	Region        string `json:"region"`
+	Runner        Runner `json:"runner"`
+	RunnerGroupID int64  `json:"runner_group_id"`
 }
 
 func (c *Config) AccountNames() []string {
@@ -116,9 +106,6 @@ func mergePolicy(base, override Policy) Policy {
 	if override.Pool != "" {
 		base.Pool = override.Pool
 	}
-	if override.Regions != nil {
-		base.Regions = override.Regions
-	}
 	if override.MaxConcurrentVMs != nil {
 		base.MaxConcurrentVMs = override.MaxConcurrentVMs
 	}
@@ -146,25 +133,6 @@ func (c *Config) Resolve(account, repo string) (Plan, int, bool, error) {
 	if !ok {
 		return Plan{}, 0, false, fmt.Errorf("account %q repo %q references unknown pool %q", account, repo, p.Pool)
 	}
-	regions := pool.Regions
-	if pool.AnyRegion {
-		regions = []string{""}
-	}
-	if p.Regions != nil {
-		if len(p.Regions) == 0 {
-			return Plan{}, 0, false, fmt.Errorf("regions must not be empty")
-		}
-		for _, region := range p.Regions {
-			found := pool.AnyRegion
-			for _, allowed := range pool.Regions {
-				found = found || strings.EqualFold(region, allowed)
-			}
-			if strings.TrimSpace(region) == "" || !found {
-				return Plan{}, 0, false, fmt.Errorf("region %q is outside pool %q", region, p.Pool)
-			}
-		}
-		regions = p.Regions
-	}
 	limit := c.Limits.MaxConcurrentVMs
 	if p.MaxConcurrentVMs != nil {
 		limit = *p.MaxConcurrentVMs
@@ -180,7 +148,7 @@ func (c *Config) Resolve(account, repo string) (Plan, int, bool, error) {
 		return Plan{}, 0, false, fmt.Errorf("max_job_duration must be positive")
 	}
 	paused := a.Paused || pool.Paused || !a.Includes(repo) || (p.Paused != nil && *p.Paused)
-	return Plan{BaseImage: pool.BaseImage, BaseImages: append([]string(nil), pool.BaseImages...), Account: account, APIBaseURL: c.AccountGitHub(account).APIBaseURL, Pool: p.Pool, SKU: pool.SKU, Regions: append([]string(nil), regions...), Runner: runner, RunnerGroupID: c.GitHub.RunnerGroupID}, limit, paused, nil
+	return Plan{BaseImage: pool.BaseImage, Account: account, APIBaseURL: c.AccountGitHub(account).APIBaseURL, Pool: p.Pool, SKU: pool.SKU, Region: pool.Region, Runner: runner, RunnerGroupID: c.GitHub.RunnerGroupID}, limit, paused, nil
 }
 
 func (c *Config) validateAccounts() error {
@@ -194,32 +162,14 @@ func (c *Config) validateAccounts() error {
 		return fmt.Errorf("github.poll.interval must be positive")
 	}
 	for name, p := range c.Pools {
-		if p.BaseImage != "" && !validImageName(p.BaseImage) {
-			return fmt.Errorf("pool %q has invalid base_image", name)
-		}
-		if p.BaseImage != "" && len(p.BaseImages) > 0 {
-			return fmt.Errorf("pool %q cannot set both base_image and base_images", name)
-		}
-		seenImages := map[string]bool{}
-		for _, image := range p.BaseImages {
-			if !validImageName(image) || seenImages[image] {
-				return fmt.Errorf("pool %q has invalid or duplicate base_images entry %q", name, image)
-			}
-			seenImages[image] = true
+		if !validImageName(p.BaseImage) {
+			return fmt.Errorf("pool %q requires a valid base_image", name)
 		}
 		if name == "" || p.SKU == "" || p.MaxConcurrentVMs < 1 {
 			return fmt.Errorf("pool %q requires sku and max_concurrent_vms >= 1", name)
 		}
-		if p.AnyRegion == (len(p.Regions) > 0) {
-			return fmt.Errorf("pool %q requires either nonempty regions or any_region: true", name)
-		}
-		seen := map[string]bool{}
-		for _, region := range p.Regions {
-			key := strings.ToLower(region)
-			if strings.TrimSpace(region) != region || region == "" || len(region) > 32 || strings.Contains(region, ",") || seen[key] {
-				return fmt.Errorf("pool %q has empty, padded, or duplicate region", name)
-			}
-			seen[key] = true
+		if !validRegion(p.Region) {
+			return fmt.Errorf("pool %q requires a valid region", name)
 		}
 	}
 	explicit := map[string]string{}
@@ -262,4 +212,10 @@ func (c *Config) validateAccounts() error {
 
 func validImageName(name string) bool {
 	return len(name) <= 128 && regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`).MatchString(name)
+}
+
+// validRegion accepts one exact worker tag: nonempty, unpadded, at most 32
+// bytes, and not a comma-separated list.
+func validRegion(region string) bool {
+	return region != "" && strings.TrimSpace(region) == region && len(region) <= 32 && !strings.Contains(region, ",")
 }

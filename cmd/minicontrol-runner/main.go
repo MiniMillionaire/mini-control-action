@@ -75,8 +75,8 @@ func main() {
 			accountCfg.GitHub = cfg.AccountGitHub(name)
 			plan, _, _, _ := cfg.Resolve(name, "")
 			accountCfg.MiniControl.SKU = plan.SKU
-			accountCfg.MiniControl.BaseImage = plan.Images()[0]
-			accountCfg.MiniControl.WorkerTag = plan.Regions[0]
+			accountCfg.MiniControl.BaseImage = plan.BaseImage
+			accountCfg.MiniControl.WorkerTag = plan.Region
 			client, _ := githubapp.New(accountCfg.GitHub, log)
 			fmt.Println("account:", name)
 			if runDryRun(ctx, &accountCfg, mc, client) != 0 {
@@ -276,7 +276,7 @@ func runSmoke(ctx context.Context, cfg *config.Config, mc *minicontrol.Client, s
 			fmt.Println("deleted vm", vm.ID)
 		}
 	}()
-	if tag != "" && !slices.ContainsFunc(vm.WorkerTags, func(t string) bool { return strings.EqualFold(t, tag) }) {
+	if !slices.ContainsFunc(vm.WorkerTags, func(t string) bool { return strings.EqualFold(t, tag) }) {
 		fmt.Printf("placement: FAILED: worker %q does not carry requested tag %q\n", vm.WorkerName, tag)
 		return 1
 	}

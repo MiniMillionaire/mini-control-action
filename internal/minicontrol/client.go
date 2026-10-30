@@ -169,6 +169,9 @@ func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest, idempotencyK
 	if n := len(idempotencyKey); n < 1 || n > 128 {
 		return nil, fmt.Errorf("idempotency key must be 1-128 bytes, got %d", n)
 	}
+	if req.BaseImage == "" || req.Region == "" || req.SKU == "" {
+		return nil, fmt.Errorf("%w (got %q, %q, %q)", ErrIncompleteCreate, req.SKU, req.BaseImage, req.Region)
+	}
 	if err := c.waitCreateToken(ctx); err != nil {
 		return nil, err
 	}
@@ -177,7 +180,7 @@ func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest, idempotencyK
 	if err := c.do(ctx, http.MethodPost, "/vms", req, hdr, vm); err != nil {
 		// The unknown-field rejection is generic ("invalid json"), so name the
 		// likely culprit here rather than making the operator rediscover it.
-		if ae, ok := err.(*APIError); ok && ae.Status == 400 && req.Region != "" {
+		if ae, ok := err.(*APIError); ok && ae.Status == 400 {
 			c.log.Error("create rejected; this deployment may not accept a region",
 				"region", req.Region, "error", ae.Message)
 		}

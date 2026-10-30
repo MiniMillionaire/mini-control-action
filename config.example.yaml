@@ -64,15 +64,14 @@ minicontrol:
                                          # (the browser hostname 404s API keys)
   api_key: ${MINICONTROL_API_KEY}        # mck_... from the mini-control console
   sku: m4-big-v1                         # fixed preset: 8 CPU / 8 GiB / 150 GiB
-  # base_image: example-image            # optional exact catalog image name
-  worker_tag: ""                         # optional placement constraint, e.g.
-                                         # "jp-east-01". Sent as {"region": ...},
-                                         # matched case-insensitively and
-                                         # exactly against one worker tag.
-                                         # Empty = any eligible worker.
-                                         # No match => 409
-                                         # no_workers_matching_tag; a server
+  base_image: example-image              # required exact catalog image name
+  worker_tag: example-region             # required placement, e.g. "jp-east-01".
+                                         # Sent as {"region": ...}, matched
+                                         # case-insensitively and exactly
+                                         # against one worker tag. No match =>
+                                         # 409 no_workers_matching_tag; a server
                                          # that rejects the field => 400.
+                                         # There is no fallback image or region.
                                          # Either way the create fails — the
                                          # constraint is never dropped silently.
                                          # NOTE: untagged creates skip workers

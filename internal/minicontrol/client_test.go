@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ const testKey = "mck_test"
 func newClient(t *testing.T) (*minicontrol.Client, *fake.Server) {
 	t.Helper()
 	srv := fake.New(testKey)
+	srv.FleetTag = "east"
 	t.Cleanup(srv.Close)
 	c := minicontrol.New(srv.BaseURL(), testKey, 5*time.Second, slog.Default())
 	return c, srv
@@ -43,7 +46,7 @@ func TestAuthAndSKUs(t *testing.T) {
 func TestCreateIdempotencyReplay(t *testing.T) {
 	c, srv := newClient(t)
 	ctx := context.Background()
-	req := minicontrol.CreateVMRequest{SKU: "m4-big-v1"}
+	req := minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "east"}
 	vm1, err := c.CreateVM(ctx, req, "key-1")
 	if err != nil {
 		t.Fatal(err)
@@ -59,31 +62,41 @@ func TestCreateIdempotencyReplay(t *testing.T) {
 		t.Fatalf("server created %d vms, want 1", srv.CreateCount)
 	}
 	// Different body under the same key must conflict.
-	if _, err := c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-tiny-v1"}, "key-1"); err == nil {
+	if _, err := c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-tiny-v1", BaseImage: "example-image", Region: "east"}, "key-1"); err == nil {
 		t.Fatal("expected 409 for idempotency mismatch")
 	}
 }
 
-// The live API-key create takes {"sku","region"}; the old "tag" field is
-// unknown JSON and 400s. Empty region must be omitted so untagged creates
-// place on any eligible worker.
+// The live API-key create takes {"sku","base_image","region"}; the old "tag"
+// field is unknown JSON and 400s.
 func TestCreateVMRequestJSONUsesRegion(t *testing.T) {
-	tagged, err := json.Marshal(minicontrol.CreateVMRequest{SKU: "m4-titan-v1", Region: "jp-east-01"})
+	body, err := json.Marshal(minicontrol.CreateVMRequest{SKU: "m4-titan-v1", BaseImage: "example-image", Region: "jp-east-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(tagged, []byte(`"region":"jp-east-01"`)) {
-		t.Fatalf("create body missing region: %s", tagged)
+	if !bytes.Contains(body, []byte(`"region":"jp-east-01"`)) || !bytes.Contains(body, []byte(`"base_image":"example-image"`)) {
+		t.Fatalf("create body missing placement: %s", body)
 	}
-	if bytes.Contains(tagged, []byte(`"tag"`)) {
-		t.Fatalf("create body still sends tag: %s", tagged)
+	if bytes.Contains(body, []byte(`"tag"`)) {
+		t.Fatalf("create body still sends tag: %s", body)
 	}
-	untagged, err := json.Marshal(minicontrol.CreateVMRequest{SKU: "m4-titan-v1"})
-	if err != nil {
-		t.Fatal(err)
+}
+
+// An omitted image or region would let the server pick its default image or
+// any eligible worker. The client refuses to send such a create at all.
+func TestCreateRefusesIncompleteRequest(t *testing.T) {
+	c, srv := newClient(t)
+	for name, req := range map[string]minicontrol.CreateVMRequest{
+		"no region": {SKU: "m4-big-v1", BaseImage: "example-image"},
+		"no image":  {SKU: "m4-big-v1", Region: "east"},
+		"no sku":    {BaseImage: "example-image", Region: "east"},
+	} {
+		if _, err := c.CreateVM(context.Background(), req, "key-"+strings.ReplaceAll(name, " ", "-")); !errors.Is(err, minicontrol.ErrIncompleteCreate) {
+			t.Fatalf("%s: error = %v, want ErrIncompleteCreate", name, err)
+		}
 	}
-	if bytes.Contains(untagged, []byte("region")) {
-		t.Fatalf("empty region must be omitted: %s", untagged)
+	if len(srv.IdemKeys) != 0 {
+		t.Fatalf("incomplete creates reached the server: %d", len(srv.IdemKeys))
 	}
 }
 
@@ -92,7 +105,7 @@ func TestCreateVMRequestJSONUsesRegion(t *testing.T) {
 func TestCreateTagRejectionIsFatal(t *testing.T) {
 	c, srv := newClient(t)
 	srv.RejectTag = true
-	vm, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", Region: "cn-east-01-test"}, "key-tag")
+	vm, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "cn-east-01-test"}, "key-tag")
 	if err == nil {
 		t.Fatalf("tagged create succeeded against a server that rejects tags: %+v", vm)
 	}
@@ -110,7 +123,7 @@ func TestCreateTagPlacement(t *testing.T) {
 	srv.WorkerName = "zz-mini-worker-05"
 	ctx := context.Background()
 
-	vm, err := c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1", Region: "cn-east-01"}, "key-place")
+	vm, err := c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "cn-east-01"}, "key-place")
 	if err != nil {
 		t.Fatalf("tagged create failed: %v", err)
 	}
@@ -121,7 +134,7 @@ func TestCreateTagPlacement(t *testing.T) {
 		t.Fatalf("worker_tags = %v, want [cn-east-01]", vm.WorkerTags)
 	}
 
-	_, err = c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1", Region: "jp-east-01"}, "key-nomatch")
+	_, err = c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "jp-east-01"}, "key-nomatch")
 	if !minicontrol.IsCapacity(err) {
 		t.Fatalf("unmatched tag error = %v, want a structured capacity 409", err)
 	}
@@ -130,7 +143,7 @@ func TestCreateTagPlacement(t *testing.T) {
 func TestCreate429RetryDelay(t *testing.T) {
 	c, srv := newClient(t)
 	srv.Inject429 = 1
-	_, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1"}, "key-429")
+	_, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "east"}, "key-429")
 	if err == nil {
 		t.Fatal("expected 429")
 	}
@@ -152,7 +165,7 @@ func TestVMLifecycleAndExec(t *testing.T) {
 	srv.GetsUntilReady = 2
 	srv.Exec = func(vmID, cmd string) (int, string, string) { return 0, "Darwin fake 25.0\n", "" }
 	ctx := context.Background()
-	vm, err := c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1"}, "key-lc")
+	vm, err := c.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "east"}, "key-lc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +200,7 @@ func TestVMLifecycleAndExec(t *testing.T) {
 func TestCapacityError(t *testing.T) {
 	c, srv := newClient(t)
 	srv.CapacityReason = "no_slots_available"
-	_, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1"}, "key-cap")
+	_, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "east"}, "key-cap")
 	if !minicontrol.IsCapacity(err) {
 		t.Fatalf("want capacity error, got %v", err)
 	}
@@ -195,14 +208,14 @@ func TestCapacityError(t *testing.T) {
 
 func TestCreateValidatesIdempotencyKeyLength(t *testing.T) {
 	c, srv := newClient(t)
-	if _, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1"}, ""); err == nil {
+	if _, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "east"}, ""); err == nil {
 		t.Fatal("empty idempotency key accepted")
 	}
 	long := make([]byte, 129)
 	for i := range long {
 		long[i] = 'a'
 	}
-	if _, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1"}, string(long)); err == nil {
+	if _, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "east"}, string(long)); err == nil {
 		t.Fatal("129-byte idempotency key accepted")
 	}
 	if creates, _ := srv.Counts(); creates != 0 {
@@ -216,16 +229,16 @@ func TestCreateValidatesIdempotencyKeyLength(t *testing.T) {
 func TestCapacity409ReplayIsSticky(t *testing.T) {
 	c, srv := newClient(t)
 	srv.SetCapacityReason("no_slots_available")
-	_, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1"}, "key-sticky")
+	_, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "east"}, "key-sticky")
 	if !minicontrol.IsCapacity(err) {
 		t.Fatalf("want capacity 409, got %v", err)
 	}
 	srv.SetCapacityReason("")
-	_, err = c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1"}, "key-sticky")
+	_, err = c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "east"}, "key-sticky")
 	if !minicontrol.IsCapacity(err) {
 		t.Fatalf("replayed key should still return the stored 409, got %v", err)
 	}
-	if _, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1"}, "key-fresh"); err != nil {
+	if _, err := c.CreateVM(context.Background(), minicontrol.CreateVMRequest{SKU: "m4-big-v1", BaseImage: "example-image", Region: "east"}, "key-fresh"); err != nil {
 		t.Fatalf("fresh key should succeed once capacity is back: %v", err)
 	}
 }

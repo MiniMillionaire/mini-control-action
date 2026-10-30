@@ -50,10 +50,14 @@ go run ./cmd/minicontrol-runner --config config.yaml --dry-run   # safe: creates
   region is a `409 no_workers_matching_tag`, so it lands in the capacity
   path and retries within the job budget rather than failing instantly — a
   typo looks like a capacity stall, so read the reason code in the warning.
-  Omitting region places on any eligible worker and skips workers whose
-  tags end in a server-configured suffix (`client_api.exclude_tag_suffixes`,
-  live default `["test"]`); an explicit region bypasses that fence, which
-  is why a `*-test` worker is only reachable with region set.
+  An explicit region bypasses the server's automatic `*-test` suffix fence,
+  which is why a `*-test` worker is reachable at all.
+- **There is no fallback.** A pool (or single-pool config) names exactly one
+  `base_image` and one region, both required, and every create sends both.
+  Capacity rejection retries that same pair under a fresh key; it never
+  advances to another image or region, and never lets the server choose its
+  default image or any eligible worker. `minicontrol.CreateVM` refuses a
+  request missing either one (`ErrIncompleteCreate`), and the job fails.
 - **Always log `worker_name`/`worker_tags` from the create response.** They
   are the only fleet visibility an API key gets and the only proof a
   requested placement was honoured; a whole debugging session was spent

@@ -98,3 +98,27 @@ func TestTerminal(t *testing.T) {
 		t.Fatal("Terminal() classification wrong")
 	}
 }
+
+// State written before pools named one image and one region still loads: the
+// removed fallback fields are ignored, and the frozen plan simply has neither.
+func TestLegacyFallbackPlanLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{"version":2,"records":[{"plan":{"base_images":["preferred","fallback"],"account":"personal",` +
+		`"api_base_url":"https://api.github.com","pool":"macos","sku":"m4-titan-v1-special","regions":["east","west"],` +
+		`"runner":{},"runner_group_id":1},"region_index":1,"image_index":1,"job_id":7,"run_attempt":1,` +
+		`"repo":"acme/widgets","state":"complete"}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path, slog.Default())
+	if err != nil {
+		t.Fatalf("legacy state rejected: %v", err)
+	}
+	records := s.List()
+	if len(records) != 1 || records[0].Plan == nil || records[0].Plan.Account != "personal" {
+		t.Fatalf("legacy record not loaded: %+v", records)
+	}
+	if records[0].Plan.BaseImage != "" || records[0].Plan.Region != "" {
+		t.Fatalf("legacy fallback lists leaked into the plan: %+v", records[0].Plan)
+	}
+}

@@ -40,6 +40,9 @@ type Server struct {
 	vms         map[string]*VM
 	idempotency map[string]idemRecord // key -> stored response
 	nextID      int
+	// Every base image and region any create request named, accepted or not.
+	requestedImages  map[string]bool
+	requestedRegions map[string]bool
 
 	// Knobs (set before use; guarded by mu for mid-test changes).
 	RejectTag       bool     // 400 on create when body has a region field
@@ -71,6 +74,9 @@ func New(apiKey string) *Server {
 		vms:         map[string]*VM{},
 		idempotency: map[string]idemRecord{},
 		IdemKeys:    map[string]bool{},
+
+		requestedImages:  map[string]bool{},
+		requestedRegions: map[string]bool{},
 		SKUs: []map[string]any{
 			{"id": "m4-big-v1", "hardware_profile": "m4", "cpu_cores": 8, "memory_mib": 8192, "disk_gib": 150, "available": true,
 				"price": map[string]any{"cost_factor": 0.1635, "currency": "USD", "configured": true}},
@@ -101,6 +107,36 @@ func (s *Server) SetCapacityReason(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.CapacityReason = reason
+}
+
+// SetFleetImages replaces the catalog while the server is live.
+func (s *Server) SetFleetImages(images []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.FleetImages = images
+}
+
+// RequestedImages returns every distinct base image a create named, sorted.
+func (s *Server) RequestedImages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sortedKeys(s.requestedImages)
+}
+
+// RequestedRegions returns every distinct region a create named, sorted.
+func (s *Server) RequestedRegions() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sortedKeys(s.requestedRegions)
+}
+
+func sortedKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // IdemKeyCount returns how many distinct Idempotency-Keys were seen.
@@ -259,6 +295,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	s.LastIdempotency = idem
 	s.IdemKeys[idem] = true
+	s.requestedImages[req.BaseImage] = true
+	s.requestedRegions[req.Region] = true
 
 	if s.RejectTag && req.Region != "" {
 		// Mirror the live server: unknown-field rejections carry a generic

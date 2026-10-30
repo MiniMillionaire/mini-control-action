@@ -82,20 +82,17 @@ and are polled even when absent from discovery. Exclusion always wins.
 
 Policy values inherit from global `defaults`, then account `defaults`, then
 repository overrides. Set `pool`, `max_concurrent_vms`, `max_job_duration`,
-`regions`, or `paused`. A repository's regions must be a nonempty subset of
-its pool's regions. Region lists replace inherited lists; they never merge.
-Account and pool pauses cannot be overridden by a repository.
+or `paused`. Account and pool pauses cannot be overridden by a repository.
 
-Pools specify `sku`, optional `base_image` (exact catalog name) or an ordered
-`base_images` fallback list, ordered `regions`, and `max_concurrent_vms`. Explicit
-capacity rejection advances to the next permitted region with a fresh durable
-idempotency key; once every region has rejected an image, the next image is
-tried, wrapping back to the first. Missing or unsynced images are 409
-rejections too (`base_image_not_found`, `base_image_not_ready`), so they fall
-back the same way. A single region keeps retrying there. No capacity fallback
-removes placement constraints. `any_region: true` is a separate explicit choice
-and cannot be combined with `regions`. Transport failures retain the same
-request and key until its outcome is known. Worker placement is logged.
+Pools specify `sku`, `base_image` (exact catalog name), `region` (one exact
+worker tag), and `max_concurrent_vms`; image and region are both required.
+There is no fallback of any kind: an explicit capacity rejection, including a
+missing or unsynced image (`base_image_not_found`, `base_image_not_ready`),
+retries the same image in the same region with a fresh durable idempotency
+key until the job budget runs out. Every create names its image and region,
+so the server's default image and any-worker placement are never used.
+Transport failures retain the same request and key until its outcome is
+known. Worker placement is logged.
 
 Global, pool, and repository concurrency limits apply together. Waiting
 repositories share admission opportunities, and capacity backoff holds no
@@ -130,9 +127,16 @@ Back up configuration and state before upgrading. Old single-token config
 remains supported. To enable accounts for the first time, drain all existing
 nonterminal records first; startup refuses to reinterpret active legacy jobs.
 Keep existing account names, GitHub hosts, runner groups, and referenced pools
-until their active jobs finish. In-flight jobs retain their original SKU, image selection,
-region candidates, selected region, and runner settings across restarts.
+until their active jobs finish. In-flight jobs retain their original SKU, image,
+region, and runner settings across restarts.
 Configuration changes take effect on restart; there is no hot reload.
+
+Fallback lists are gone. A pool with `regions`, `any_region`, or `base_images`
+no longer loads (unknown field), and single-pool config now requires
+`minicontrol.base_image` and `minicontrol.worker_tag`. Rewrite each pool as one
+`base_image` plus one `region` and drain nonterminal jobs first: startup
+refuses an active job whose persisted plan predates the single image and
+region. Finished records from older versions load unchanged.
 
 Compose reads `.env` through `env_file`, so additional token variable names do
 not require editing the public Compose file. Never commit real `.env`,

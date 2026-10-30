@@ -273,8 +273,18 @@ func (c *Config) Validate() error {
 	if !strings.HasPrefix(c.MiniControl.APIKey, "mck_") {
 		bad("minicontrol.api_key must be a mck_-prefixed key (got %d bytes)", len(c.MiniControl.APIKey))
 	}
-	if c.MiniControl.SKU == "" && len(c.GitHub.Accounts) == 0 {
-		bad("minicontrol.sku is required")
+	if len(c.GitHub.Accounts) == 0 {
+		// Single-pool mode carries the same no-fallback contract as a pool:
+		// one explicit image, SKU, and worker tag.
+		if c.MiniControl.SKU == "" {
+			bad("minicontrol.sku is required")
+		}
+		if !validImageName(c.MiniControl.BaseImage) {
+			bad("minicontrol.base_image is required and must be a catalog name")
+		}
+		if !validRegion(c.MiniControl.WorkerTag) {
+			bad("minicontrol.worker_tag is required and must be one exact worker tag")
+		}
 	}
 	hasSelfHosted := false
 	for _, l := range c.Runner.Labels {

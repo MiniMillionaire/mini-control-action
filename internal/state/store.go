@@ -40,8 +40,6 @@ func (s JobState) Terminal() bool { return s == StateComplete || s == StateFaile
 type Record struct {
 	Namespace      string       `json:"namespace,omitempty"`
 	Plan           *config.Plan `json:"plan,omitempty"`
-	RegionIndex    int          `json:"region_index,omitempty"`
-	ImageIndex     int          `json:"image_index,omitempty"`
 	JobID          int64        `json:"job_id"`
 	RunAttempt     int          `json:"run_attempt"`
 	Retry          int          `json:"retry"`
@@ -294,8 +292,6 @@ func cloneRecord(r Record) Record {
 	r.Labels = append([]string(nil), r.Labels...)
 	if r.Plan != nil {
 		p := *r.Plan
-		p.Regions = append([]string(nil), p.Regions...)
-		p.BaseImages = append([]string(nil), p.BaseImages...)
 		p.Runner.Labels = append([]string(nil), p.Runner.Labels...)
 		r.Plan = &p
 	}

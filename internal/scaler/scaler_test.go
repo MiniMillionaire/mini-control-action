@@ -32,7 +32,7 @@ func testConfig(t *testing.T, mcURL, ghURL string) *config.Config {
 			Poll: config.Poll{Interval: d(time.Minute)},
 		},
 		MiniControl: config.MiniControl{
-			BaseURL: mcURL, APIKey: testKey, SKU: "m4-big-v1",
+			BaseURL: mcURL, APIKey: testKey, SKU: "m4-big-v1", BaseImage: "example-image", WorkerTag: "east",
 			PollInterval: d(10 * time.Millisecond), ProvisionTimeout: d(5 * time.Second), RequestTimeout: d(5 * time.Second),
 		},
 		Runner: config.Runner{
@@ -103,6 +103,7 @@ func newHarness(t *testing.T, opts ...func(*config.Config, *fake.Server)) *harne
 	exec := &vmExec{launched: map[string]bool{}, status: "PHASE=run\n---MCRA-LOG---\nListening for Jobs"}
 	mcSrv.Exec = exec.fn
 	mcSrv.GetsUntilReady = 1
+	mcSrv.FleetTag = "east"
 
 	cfg := testConfig(t, mcSrv.BaseURL(), ghSrv.URL)
 	for _, opt := range opts {
@@ -136,8 +137,8 @@ func multiHarness(t *testing.T, globalLimit int) *harness {
 		one := 1
 		cfg.Defaults.MaxConcurrentVMs = &one
 		cfg.Pools = map[string]config.Pool{
-			"standard": {BaseImage: "example-image", SKU: "m4-big-v1", Regions: []string{"missing", "east"}, MaxConcurrentVMs: 2},
-			"release":  {SKU: "m4-big-v1", Regions: []string{"east"}, MaxConcurrentVMs: 1},
+			"standard": {BaseImage: "example-image", SKU: "m4-big-v1", Region: "east", MaxConcurrentVMs: 2},
+			"release":  {BaseImage: "release-image", SKU: "m4-big-v1", Region: "east", MaxConcurrentVMs: 1},
 		}
 		mc.FleetTag = "east"
 	})
@@ -166,14 +167,14 @@ func submitAccountJob(t *testing.T, h *harness, account, repo string, id int64) 
 	return state.Key{JobID: id, RunAttempt: 1, Namespace: ns}
 }
 
-func TestAccountsUseBoundCredentialsAndAllowedRegionFallback(t *testing.T) {
+func TestAccountsUseBoundCredentialsAndPoolPlacement(t *testing.T) {
 	h := multiHarness(t, 2)
 	key := submitAccountJob(t, h, "personal", "acme/widgets", 701)
 	waitFor(t, "account runner", 5*time.Second, func() bool { rec, _ := h.store.Get(key); return rec.State == state.StateRunnerUp })
 	rec, _ := h.store.Get(key)
 	vm, _ := h.mc.VM(rec.VMID)
-	if rec.Plan.Account != "personal" || rec.RegionIndex != 1 || vm.Tag != "east" || vm.BaseImage != "example-image" || rec.Plan.BaseImage != "example-image" || h.mc.IdemKeyCount() != 2 {
-		t.Fatalf("wrong account/placement/retry: account=%s index=%d region=%s keys=%d", rec.Plan.Account, rec.RegionIndex, vm.Tag, h.mc.IdemKeyCount())
+	if rec.Plan.Account != "personal" || vm.Tag != "east" || vm.BaseImage != "example-image" || rec.Plan.BaseImage != "example-image" || rec.Plan.Region != "east" || h.mc.IdemKeyCount() != 1 {
+		t.Fatalf("wrong account/placement: account=%s image=%s region=%s keys=%d", rec.Plan.Account, vm.BaseImage, vm.Tag, h.mc.IdemKeyCount())
 	}
 	// Another token discovering this same job cannot create a second record/VM.
 	ev := queuedEvent(701)
@@ -203,7 +204,7 @@ func TestRepositoryLimitDoesNotBlockAnotherRepository(t *testing.T) {
 func TestCapacityWaitReleasesGlobalReservation(t *testing.T) {
 	h := multiHarness(t, 1)
 	pool := h.cfg.Pools["standard"]
-	pool.Regions = []string{"missing"}
+	pool.Region = "missing"
 	h.cfg.Pools["standard"] = pool
 	submitAccountJob(t, h, "personal", "acme/widgets", 721)
 	waitFor(t, "capacity rejection", time.Second, func() bool { return h.mc.IdemKeyCount() > 0 })
@@ -220,7 +221,6 @@ func TestRecoveryReplaysOriginalImageRegionAndKeyAfterConfigChange(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan.Regions = []string{"east"}
 	ns := githubapp.RepositoryNamespace(plan.APIBaseURL, "acme/widgets")
 	if err := h.store.BindRepository(ns, "personal"); err != nil {
 		t.Fatal(err)
@@ -237,7 +237,7 @@ func TestRecoveryReplaysOriginalImageRegionAndKeyAfterConfigChange(t *testing.T)
 		t.Fatal(err)
 	}
 	h.gh.SetJob(&ghfake.Job{ID: 731, RunID: 7310, RunAttempt: 1, Status: "queued"})
-	h.cfg.Pools["standard"] = config.Pool{SKU: "different-sku", BaseImage: "different-image", Regions: []string{"west"}, MaxConcurrentVMs: 2}
+	h.cfg.Pools["standard"] = config.Pool{SKU: "different-sku", BaseImage: "different-image", Region: "west", MaxConcurrentVMs: 2}
 	h.sc.Resume()
 	waitFor(t, "recovered runner", 5*time.Second, func() bool { got, _ := h.store.Get(rec.Key()); return got.State == state.StateRunnerUp })
 	got, _ := h.store.Get(rec.Key())
@@ -431,7 +431,9 @@ func TestCrashResumeReusesIdempotencyKey(t *testing.T) {
 	rec.IdempotencyKey = state.NewIdemKey(rec.JobID, rec.RunAttempt, rec.Retry)
 	ctx := context.Background()
 	mcClient := minicontrol.New(h.cfg.MiniControl.BaseURL, testKey, time.Second, slog.Default())
-	pre, err := mcClient.CreateVM(ctx, minicontrol.CreateVMRequest{SKU: "m4-big-v1"}, rec.IdempotencyKey)
+	pre, err := mcClient.CreateVM(ctx, minicontrol.CreateVMRequest{
+		SKU: "m4-big-v1", BaseImage: h.cfg.MiniControl.BaseImage, Region: h.cfg.MiniControl.WorkerTag,
+	}, rec.IdempotencyKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,29 +577,52 @@ func TestReadyWithoutCredentialsWaits(t *testing.T) {
 	})
 }
 
-func TestBaseImageFallbackAfterRegionsAreExhausted(t *testing.T) {
+// A capacity rejection never moves a job to another image or placement: it
+// waits and retries the pool's one image in the pool's one region, under a
+// fresh idempotency key each time, until that create succeeds.
+func TestCapacityRejectionRetriesTheSameImageAndRegion(t *testing.T) {
 	h := multiHarness(t, 2)
-	h.cfg.Pools["standard"] = config.Pool{BaseImages: []string{"preferred", "fallback"}, SKU: "m4-big-v1", Regions: []string{"missing", "east"}, MaxConcurrentVMs: 2}
-	h.mc.FleetImages = []string{"fallback"}
+	h.mc.FleetImages = []string{"other-image"}
 	key := submitAccountJob(t, h, "personal", "acme/widgets", 702)
-	waitFor(t, "fallback runner", 10*time.Second, func() bool { rec, _ := h.store.Get(key); return rec.State == state.StateRunnerUp })
+	waitFor(t, "repeated rejections", 5*time.Second, func() bool { return h.mc.IdemKeyCount() >= 3 })
+	if creates, _ := h.mc.Counts(); creates != 0 {
+		t.Fatalf("created %d VMs while the pool image was missing", creates)
+	}
+	h.mc.SetFleetImages([]string{"example-image"})
+	waitFor(t, "runner on the pool image", 5*time.Second, func() bool { rec, _ := h.store.Get(key); return rec.State == state.StateRunnerUp })
 	rec, _ := h.store.Get(key)
 	vm, _ := h.mc.VM(rec.VMID)
-	// preferred@missing, preferred@east, fallback@missing, fallback@east.
-	if vm.BaseImage != "fallback" || vm.Tag != "east" || rec.ImageIndex != 1 || rec.RegionIndex != 1 || h.mc.IdemKeyCount() != 4 {
-		t.Fatalf("wrong fallback: image=%s region=%s indexes=%d/%d keys=%d", vm.BaseImage, vm.Tag, rec.ImageIndex, rec.RegionIndex, h.mc.IdemKeyCount())
+	if vm.BaseImage != "example-image" || vm.Tag != "east" {
+		t.Fatalf("retry changed the request: image=%s region=%s", vm.BaseImage, vm.Tag)
+	}
+	if images := h.mc.RequestedImages(); len(images) != 1 || images[0] != "example-image" {
+		t.Fatalf("creates requested images %v, want only the pool image", images)
+	}
+	if regions := h.mc.RequestedRegions(); len(regions) != 1 || regions[0] != "east" {
+		t.Fatalf("creates requested regions %v, want only the pool region", regions)
 	}
 }
 
-func TestBaseImagesPreferFirstWhenAvailable(t *testing.T) {
+// An active job persisted before pools named one image and one region has
+// neither in its plan. Resuming it would create with no placement, so startup
+// refuses instead.
+func TestConfigureAccountsRefusesActivePlanWithoutPlacement(t *testing.T) {
 	h := multiHarness(t, 2)
-	h.cfg.Pools["standard"] = config.Pool{BaseImages: []string{"preferred", "fallback"}, SKU: "m4-big-v1", Regions: []string{"east"}, MaxConcurrentVMs: 2}
-	h.mc.FleetImages = []string{"preferred", "fallback"}
-	key := submitAccountJob(t, h, "personal", "acme/widgets", 703)
-	waitFor(t, "preferred runner", 5*time.Second, func() bool { rec, _ := h.store.Get(key); return rec.State == state.StateRunnerUp })
-	rec, _ := h.store.Get(key)
-	vm, _ := h.mc.VM(rec.VMID)
-	if vm.BaseImage != "preferred" || rec.ImageIndex != 0 || h.mc.IdemKeyCount() != 1 {
-		t.Fatalf("preferred image skipped: image=%s index=%d keys=%d", vm.BaseImage, rec.ImageIndex, h.mc.IdemKeyCount())
+	plan, _, _, err := h.cfg.Resolve("personal", "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.BaseImage, plan.Region = "", ""
+	ns := githubapp.RepositoryNamespace(plan.APIBaseURL, "acme/widgets")
+	rec := state.Record{Namespace: ns, Plan: &plan, Repo: "acme/widgets", JobID: 741, RunAttempt: 1, State: state.StateQueued, QueuedAt: time.Now()}
+	if err := h.store.Upsert(rec); err != nil {
+		t.Fatal(err)
+	}
+	clients := map[string]*githubapp.Client{}
+	for _, name := range h.cfg.AccountNames() {
+		clients[name], _ = githubapp.New(h.cfg.AccountGitHub(name), slog.Default())
+	}
+	if err := h.sc.ConfigureAccounts(clients); err == nil || !strings.Contains(err.Error(), "no persisted base image and region") {
+		t.Fatalf("ConfigureAccounts error = %v, want refusal", err)
 	}
 }

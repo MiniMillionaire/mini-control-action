@@ -33,13 +33,9 @@ minicontrol:
 pools:
   standard:
     sku: m4-big-v1
-    base_image: example-image # optional; omit to use the server default
-    # base_images: [preferred-image, fallback-image]
-    #   ordered alternative to base_image: every region is tried with an
-    #   image before falling back to the next one.
-    regions: [example-region]
-    # Multiple regions are tried in order on explicit capacity rejection.
-    # To allow any eligible worker, replace regions with any_region: true.
+    base_image: example-image # required exact catalog image name
+    region: example-region    # required; one exact worker tag
+    # No fallback: a capacity rejection retries this image in this region.
     max_concurrent_vms: 4
     paused: false
 
